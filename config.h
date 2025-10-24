@@ -26,8 +26,16 @@
 #define IR_BARCODE_DIGITAL_GPIO       0      // D0 -> GP6
 
 // ==== Ultrasonic Sensor ====
-#define ULTRASONIC_TRIG_GPIO          3      // Trigger pin
-#define ULTRASONIC_ECHO_GPIO          2      // Echo pin
+#define ULTRASONIC_TRIG_GPIO          4      // Trigger pin
+#define ULTRASONIC_ECHO_GPIO          5      // Echo pin
+
+// ==== I2C Magnetometer/Accelerometer (LSM303) ====
+#define I2C_PORT                i2c1         // Using I2C1
+#define I2C_SDA_PIN             2            // SDA -> GP2
+#define I2C_SCL_PIN             3            // SCL -> GP3
+#define I2C_BAUDRATE            100000       // 100 kHz
+#define LSM303_ACC_ADDR         0x19         // Accelerometer I2C address
+#define LSM303_MAG_ADDR         0x1E         // Magnetometer I2C address
 
 // ===== Control & hardware config =====
 #define CTRL_HZ                 100
@@ -56,3 +64,6 @@
 #define ULTRASONIC_MAX_DISTANCE_CM      400.0f    // Maximum measurable distance
 #define ULTRASONIC_ECHO_TIMEOUT_US      25000     // Timeout waiting for echo
 #define ULTRASONIC_PRINT_INTERVAL_MS    500       // Print interval
+
+// ===== Magnetometer config =====
+#define MAG_PRINT_INTERVAL_MS           500

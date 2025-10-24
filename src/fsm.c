@@ -8,8 +8,9 @@
 #include "drivers/ir_line_follower.h"
 #include "drivers/ir_barcode_scanner.h"
 #include "drivers/ultrasonic.h"
+#include "hardware/adc.h"
+#include "drivers/magnetometer.h"
 #include "fsm.h"
-
 
 static encoder_t encL, encR;
 static float left_cmd = 0.30f, right_cmd = 0.30f;
@@ -28,6 +29,11 @@ void fsm_init(void) {
     
     // Initialize ultrasonic sensor
     ultrasonic_init();
+    
+    // Initialize magnetometer
+    if (!magnetometer_init()) {
+        printf("WARNING: Magnetometer initialization failed\n");
+    }
 
     // Buttons
     gpio_init(PIN_BTN_DIR); gpio_set_dir(PIN_BTN_DIR, GPIO_IN); gpio_pull_up(PIN_BTN_DIR);
@@ -43,6 +49,7 @@ void fsm_step(void) {
     static uint32_t last_line_print_ms = 0;
     static uint32_t last_barcode_print_ms = 0;
     static uint32_t last_ultrasonic_print_ms = 0;
+    static uint32_t last_mag_print_ms = 0;
 
     const float wheel_circ_mm = (float)M_PI * WHEEL_DIAMETER_MM;
     const float mm_per_tick   = wheel_circ_mm / ENCODER_CPR;
@@ -143,5 +150,11 @@ void fsm_step(void) {
     if (now_ms - last_ultrasonic_print_ms >= ULTRASONIC_PRINT_INTERVAL_MS) {
         ultrasonic_print_data();
         last_ultrasonic_print_ms = now_ms;
+    }
+
+    // Magnetometer telemetry (every 500 ms)
+    if (now_ms - last_mag_print_ms >= MAG_PRINT_INTERVAL_MS) {
+        magnetometer_print_data();
+        last_mag_print_ms = now_ms;
     }
 }
