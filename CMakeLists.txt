@@ -24,6 +24,8 @@ add_executable(INF2004-AAI2
     src/fsm.c
     src/drivers/motor.c
     src/drivers/encoder.c
+    src/drivers/ir_line_follower.c
+    src/drivers/ir_barcode_scanner.c
 )
 
 target_include_directories(INF2004-AAI2 PRIVATE include .)
@@ -33,6 +35,7 @@ target_link_libraries(INF2004-AAI2
     hardware_gpio
     hardware_irq
     hardware_timer
+    hardware_adc
 )
 
 pico_enable_stdio_usb(INF2004-AAI2 1)

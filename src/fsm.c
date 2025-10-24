@@ -4,6 +4,8 @@
 #include "config.h"
 #include "drivers/motor.h"
 #include "drivers/encoder.h"
+#include "drivers/ir_line_follower.h"
+#include "drivers/ir_barcode_scanner.h"
 #include "fsm.h"
 
 static encoder_t encL, encR;
@@ -15,8 +17,13 @@ void fsm_init(void) {
     motor_init_all();
     encoder_init(&encL, PIN_ENC_LEFT,  ENCODER_PULLUP);
     encoder_init(&encR, PIN_ENC_RIGHT, ENCODER_PULLUP);
+    
+    // Initialize ADC once before both IR sensors
+    adc_init();
+    ir_line_follower_init();
+    ir_barcode_scanner_init();
 
-    // Buttons (preserved from your demo)
+    // Buttons
     gpio_init(PIN_BTN_DIR); gpio_set_dir(PIN_BTN_DIR, GPIO_IN); gpio_pull_up(PIN_BTN_DIR);
     gpio_init(PIN_BTN_SPD); gpio_set_dir(PIN_BTN_SPD, GPIO_IN); gpio_pull_up(PIN_BTN_SPD);
 
@@ -27,11 +34,13 @@ void fsm_step(void) {
     static bool last_dir = true, last_spd = true;
     static uint32_t last_dir_t = 0, last_spd_t = 0;
     static uint32_t last_print_ms = 0;
+    static uint32_t last_line_print_ms = 0;
+    static uint32_t last_barcode_print_ms = 0;
 
     const float wheel_circ_mm = (float)M_PI * WHEEL_DIAMETER_MM;
     const float mm_per_tick   = wheel_circ_mm / ENCODER_CPR;
 
-    // Buttons: toggle direction / speed step (same logic as before)
+    // Buttons: toggle direction / speed step
     bool dir_now = gpio_get(PIN_BTN_DIR);
     bool spd_now = gpio_get(PIN_BTN_SPD);
     uint32_t now_ms = to_ms_since_boot(get_absolute_time());
@@ -47,13 +56,18 @@ void fsm_step(void) {
         left_cmd  = copysignf(s, left_cmd);
         right_cmd = copysignf(s, right_cmd);
         last_spd_t = now_ms;
+        
+        // Example: Start barcode scan when speed button pressed
+        if (!ir_barcode_is_scanning()) {
+            ir_barcode_start_scan();
+        }
     }
     last_dir = dir_now; last_spd = spd_now;
 
     // Apply motors
     motor_set(left_cmd, right_cmd);
 
-    // Read encoders (same API: read-and-clear ticks)
+    // Read encoders
     uint32_t dticks_L = encoder_read_and_clear(&encL);
     uint32_t dticks_R = encoder_read_and_clear(&encR);
 
@@ -66,7 +80,7 @@ void fsm_step(void) {
     float v_mm_s_L = dmm_L * (1000.0f / CONTROL_DT_MS);
     float v_mm_s_R = dmm_R * (1000.0f / CONTROL_DT_MS);
 
-    // Stall detection (same thresholds)
+    // Stall detection
     if (fabsf(left_cmd) > STALL_PWM_THRESHOLD) {
         stall_timer_ms_L = (dticks_L == 0) ? (stall_timer_ms_L + CONTROL_DT_MS) : 0;
         if (stall_timer_ms_L >= STALL_WINDOW_MS) {
@@ -85,10 +99,27 @@ void fsm_step(void) {
         }
     } else { stall_timer_ms_R = 0; }
 
-    // Telemetry (every 500 ms)
+    // Update barcode scanner (call every loop iteration)
+    ir_barcode_update();
+
+    // Motor telemetry (every 500 ms)
     if (now_ms - last_print_ms >= 500) {
         printf("L: v=%.1fmm/s dist=%.0f | R: v=%.1fmm/s dist=%.0f\n",
                v_mm_s_L, left_distance_mm, v_mm_s_R, right_distance_mm);
         last_print_ms = now_ms;
+    }
+
+    // Line follower telemetry (every 500 ms)
+    if (now_ms - last_line_print_ms >= IR_LINE_PRINT_INTERVAL_MS) {
+        ir_line_print_data();
+        last_line_print_ms = now_ms;
+    }
+
+    // Barcode scanner telemetry (every 2 seconds)
+    if (now_ms - last_barcode_print_ms >= 2000) {
+        if (ir_barcode_is_scanning() || ir_barcode_get_data()->bar_count > 0) {
+            ir_barcode_print_data();
+        }
+        last_barcode_print_ms = now_ms;
     }
 }
