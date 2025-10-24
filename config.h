@@ -25,6 +25,10 @@
 #define IR_BARCODE_ADC_CHANNEL        1      // ADC channel 1
 #define IR_BARCODE_DIGITAL_GPIO       0      // D0 -> GP6
 
+// ==== Ultrasonic Sensor ====
+#define ULTRASONIC_TRIG_GPIO          3      // Trigger pin
+#define ULTRASONIC_ECHO_GPIO          2      // Echo pin
+
 // ===== Control & hardware config =====
 #define CTRL_HZ                 100
 #define CONTROL_DT_MS           (1000/CTRL_HZ)
@@ -45,3 +49,10 @@
 #define IR_BARCODE_THRESHOLD         2000    // Calibrate this
 #define IR_BARCODE_SAMPLE_RATE_US    1000    // Sample every 1ms for barcode
 #define BARCODE_MAX_BARS             50      // Max bars to detect
+
+// ===== Ultrasonic Sensor config =====
+#define ULTRASONIC_SPEED_CM_PER_US      0.0343f   // Speed of sound in cm/µs
+#define ULTRASONIC_MIN_DISTANCE_CM      2.0f      // Minimum measurable distance
+#define ULTRASONIC_MAX_DISTANCE_CM      400.0f    // Maximum measurable distance
+#define ULTRASONIC_ECHO_TIMEOUT_US      25000     // Timeout waiting for echo
+#define ULTRASONIC_PRINT_INTERVAL_MS    500       // Print interval

@@ -40,6 +40,7 @@ add_executable(INF2004-AAI2
     src/drivers/encoder.c
     src/drivers/ir_line_follower.c
     src/drivers/ir_barcode_scanner.c
+    src/drivers/ultrasonic.c
 )
 
 target_include_directories(INF2004-AAI2 PRIVATE include .)

@@ -7,7 +7,9 @@
 #include "drivers/encoder.h"
 #include "drivers/ir_line_follower.h"
 #include "drivers/ir_barcode_scanner.h"
+#include "drivers/ultrasonic.h"
 #include "fsm.h"
+
 
 static encoder_t encL, encR;
 static float left_cmd = 0.30f, right_cmd = 0.30f;
@@ -23,6 +25,9 @@ void fsm_init(void) {
     adc_init();
     ir_line_follower_init();
     ir_barcode_scanner_init();
+    
+    // Initialize ultrasonic sensor
+    ultrasonic_init();
 
     // Buttons
     gpio_init(PIN_BTN_DIR); gpio_set_dir(PIN_BTN_DIR, GPIO_IN); gpio_pull_up(PIN_BTN_DIR);
@@ -37,6 +42,7 @@ void fsm_step(void) {
     static uint32_t last_print_ms = 0;
     static uint32_t last_line_print_ms = 0;
     static uint32_t last_barcode_print_ms = 0;
+    static uint32_t last_ultrasonic_print_ms = 0;
 
     const float wheel_circ_mm = (float)M_PI * WHEEL_DIAMETER_MM;
     const float mm_per_tick   = wheel_circ_mm / ENCODER_CPR;
@@ -65,8 +71,17 @@ void fsm_step(void) {
     }
     last_dir = dir_now; last_spd = spd_now;
 
-    // Apply motors
-    motor_set(left_cmd, right_cmd);
+    // Check for obstacles with ultrasonic sensor
+    float obstacle_distance = ultrasonic_measure_cm();
+    if (!isnan(obstacle_distance) && obstacle_distance < 20.0f) {
+        // Stop if obstacle is closer than 20cm
+        printf("[OBSTACLE DETECTED] Distance: %.2f cm - STOPPING\n", obstacle_distance);
+        motor_stop();
+        left_cmd = right_cmd = 0.0f;
+    } else {
+        // Apply motors normally
+        motor_set(left_cmd, right_cmd);
+    }
 
     // Read encoders
     uint32_t dticks_L = encoder_read_and_clear(&encL);
@@ -122,5 +137,11 @@ void fsm_step(void) {
             ir_barcode_print_data();
         }
         last_barcode_print_ms = now_ms;
+    }
+
+    // Ultrasonic telemetry (every 500 ms)
+    if (now_ms - last_ultrasonic_print_ms >= ULTRASONIC_PRINT_INTERVAL_MS) {
+        ultrasonic_print_data();
+        last_ultrasonic_print_ms = now_ms;
     }
 }
