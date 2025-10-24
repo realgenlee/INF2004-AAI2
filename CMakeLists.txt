@@ -15,16 +15,22 @@ endif()
 set(PICO_BOARD pico_w CACHE STRING "Board type")
 cmake_minimum_required(VERSION 3.13)
 
-# Set C/C++ standards before project
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(pico_sdk_import.cmake)
 
 project(INF2004-AAI2 C CXX ASM)
 
-# Always generate compile_commands.json
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# Check if wifi_credentials.h exists
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/wifi_credentials.h")
+    message(STATUS "✓ Using wifi_credentials.h for WiFi settings")
+    add_compile_definitions(USE_WIFI_CREDENTIALS_FILE)
+else()
+    message(WARNING "⚠ wifi_credentials.h not found. Using default placeholders.")
+    message(WARNING "   Copy wifi_credentials.h.template to wifi_credentials.h and edit it.")
+endif()
 
 pico_sdk_init()
 
@@ -37,6 +43,7 @@ add_executable(INF2004-AAI2
     src/drivers/ir_barcode_scanner.c
     src/drivers/ultrasonic.c
     src/drivers/magnetometer.c
+    src/networking/wifi_mqtt.c
 )
 
 target_include_directories(INF2004-AAI2 PRIVATE 
@@ -52,6 +59,8 @@ target_link_libraries(INF2004-AAI2
     hardware_irq
     hardware_pwm
     hardware_timer
+    pico_cyw43_arch_lwip_poll
+    pico_lwip_mqtt
 )
 
 pico_enable_stdio_usb(INF2004-AAI2 1)

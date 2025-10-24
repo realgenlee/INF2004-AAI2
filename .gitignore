@@ -1,2 +1,8 @@
 build
 !.vscode/*
+
+# Add these lines to ignore credentials
+wifi_credentials.h
+secrets.h
+*.env
+*_credentials.h
