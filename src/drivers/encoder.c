@@ -1,30 +1,83 @@
-#include "drivers/encoder.h"
+#include <math.h>
+#include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "config.h"
+#include "drivers/encoder.h"
 
-// Simple lookup from gpio number -> encoder instance pointer.
-static encoder_t* _enc_for_gpio[32] = {0};
+#ifndef ENCODER_COUNT_BOTH_EDGES
+#define ENCODER_COUNT_BOTH_EDGES 0
+#endif
 
-static void _encoder_shared_isr(uint gpio, uint32_t events) {
-    if ((events & GPIO_IRQ_EDGE_RISE) && _enc_for_gpio[gpio]) {
-        _enc_for_gpio[gpio]->ticks++;
-    }
+static volatile uint32_t g_left_ticks  = 0;
+static volatile uint32_t g_right_ticks = 0;
+
+static inline void enc_gpio_init(uint pin) {
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_IN);
+#if ENCODER_PULLUP
+    gpio_pull_up(pin);
+#else
+    gpio_pull_down(pin);
+#endif
 }
 
-void encoder_init(encoder_t* enc, uint pin_a, bool pull_up) {
-    enc->pin_a = pin_a;
-    enc->ticks = 0;
+void encoder_on_gpio_irq(uint gpio, uint32_t events) {
+    uint32_t mask = 0;
+#if ENCODER_COUNT_BOTH_EDGES
+    mask = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
+#else
+    mask = GPIO_IRQ_EDGE_RISE;
+#endif
+    if ((events & mask) == 0) return;
 
-    gpio_init(pin_a);
-    gpio_set_dir(pin_a, GPIO_IN);
-    if (pull_up) gpio_pull_up(pin_a);
-    else         gpio_disable_pulls(pin_a);
-
-    _enc_for_gpio[pin_a] = enc;
-    gpio_set_irq_enabled_with_callback(pin_a, GPIO_IRQ_EDGE_RISE, true, &_encoder_shared_isr);
+    if (gpio == LEFT_ENCODER_PIN)  { g_left_ticks++;  }
+    if (gpio == RIGHT_ENCODER_PIN) { g_right_ticks++; }
 }
 
-uint32_t encoder_read_and_clear(encoder_t* enc) {
-    uint32_t t = enc->ticks;
-    enc->ticks = 0;
-    return t;
+#if ENCODER_OWNS_IRQ_CALLBACK
+static void encoder_irq_global(uint gpio, uint32_t events) {
+    encoder_on_gpio_irq(gpio, events);
+}
+#endif
+
+void encoder_init(void) {
+    enc_gpio_init(LEFT_ENCODER_PIN);
+    enc_gpio_init(RIGHT_ENCODER_PIN);
+
+#if ENCODER_OWNS_IRQ_CALLBACK
+    // Register the global IRQ callback ourselves
+#if ENCODER_COUNT_BOTH_EDGES
+    const uint32_t edge_mask = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
+#else
+    const uint32_t edge_mask = GPIO_IRQ_EDGE_RISE;
+#endif
+    gpio_set_irq_enabled_with_callback(LEFT_ENCODER_PIN,  edge_mask, true, &encoder_irq_global);
+    gpio_set_irq_enabled(RIGHT_ENCODER_PIN, edge_mask, true);
+#else
+    // Enable IRQs on pins only; app must call encoder_on_gpio_irq() from its global ISR
+#if ENCODER_COUNT_BOTH_EDGES
+    const uint32_t edge_mask = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
+#else
+    const uint32_t edge_mask = GPIO_IRQ_EDGE_RISE;
+#endif
+    gpio_set_irq_enabled(LEFT_ENCODER_PIN,  edge_mask, true);
+    gpio_set_irq_enabled(RIGHT_ENCODER_PIN, edge_mask, true);
+#endif
+}
+
+void encoder_reset_counts(void) {
+    g_left_ticks  = 0;
+    g_right_ticks = 0;
+}
+
+uint32_t encoder_left_count(void)  { return g_left_ticks;  }
+uint32_t encoder_right_count(void) { return g_right_ticks; }
+
+float encoder_mm_per_tick(void) {
+    const float wheel_circ_mm = (float)M_PI * WHEEL_DIAMETER_MM;
+    return wheel_circ_mm / ENCODER_CPR;
+}
+
+float encoder_ticks_to_mm(uint32_t ticks) {
+    return ticks * encoder_mm_per_tick();
 }

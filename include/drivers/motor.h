@@ -1,12 +1,12 @@
 #pragma once
-#include <stdbool.h>
 #include <stdint.h>
+#include <stdbool.h>
 
-// Call once at boot.
+// Cytron Robo Pico on-board drivers using two GPIOs per motor (A/B channels on same PWM slice).
+// Direction convention:
+//  - anticlockwise=false ("clockwise"): A = PWM, B = LOW
+//  - anticlockwise=true  ("anticlock"): B = PWM, A = LOW
+
 void motor_init_all(void);
-
-// Set left/right motor command in [-1.0, +1.0] (sign = direction).
-void motor_set(float left, float right);
-
-// Emergency stop both motors.
+void motor_set_speed_percent(uint speed_percent, bool anticlockwise);
 void motor_stop(void);

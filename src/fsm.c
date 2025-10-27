@@ -1,189 +1,100 @@
-#include <stdio.h>
-#include <math.h>
 #include "pico/stdlib.h"
-#include "hardware/adc.h"
+#include "pico/time.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
 #include "config.h"
 #include "drivers/motor.h"
 #include "drivers/encoder.h"
-#include "drivers/ir_line_follower.h"
-#include "drivers/ir_barcode_scanner.h"
-#include "drivers/ultrasonic.h"
-#include "drivers/magnetometer.h"
-#include "networking/wifi_mqtt.h"  // ADD THIS
 #include "fsm.h"
 
-static encoder_t encL, encR;
-static float left_cmd = 0.30f, right_cmd = 0.30f;
-static uint32_t stall_timer_ms_L = 0, stall_timer_ms_R = 0;
-static float left_distance_mm = 0.0f, right_distance_mm = 0.0f;
-static bool mqtt_enabled = false;  // ADD THIS
+// ---- Unified GPIO ISR for buttons + encoders ----
+static volatile bool g_toggle_dir_req = false;
+static volatile bool g_change_speed_req = false;
+static volatile uint32_t g_last_dir_ms = 0;
+static volatile uint32_t g_last_spd_ms = 0;
+
+static inline uint32_t now_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
+}
+
+static void gpio_isr_unified(uint gpio, uint32_t events) {
+    // Forward event to encoder module (increments ticks if from encoder pins)
+    encoder_on_gpio_irq(gpio, events);
+
+    // Handle buttons (active-low: use falling edge)
+    uint32_t t = now_ms();
+    if (gpio == BUTTON_DIR && (events & GPIO_IRQ_EDGE_FALL)) {
+        if ((t - g_last_dir_ms) > DEBOUNCE_MS) { g_toggle_dir_req = true; g_last_dir_ms = t; }
+    }
+    if (gpio == BUTTON_SPD && (events & GPIO_IRQ_EDGE_FALL)) {
+        if ((t - g_last_spd_ms) > DEBOUNCE_MS) { g_change_speed_req = true; g_last_spd_ms = t; }
+    }
+}
+
+// ---- App state ----
+static bool anticlockwise = false;
+static uint speed = 70;
+static uint32_t last_print_ms = 0;
 
 void fsm_init(void) {
+    stdio_init_all();
     motor_init_all();
-    encoder_init(&encL, PIN_ENC_LEFT,  ENCODER_PULLUP);
-    encoder_init(&encR, PIN_ENC_RIGHT, ENCODER_PULLUP);
-    
-    // Initialize ADC once before both IR sensors
-    adc_init();
-    ir_line_follower_init();
-    ir_barcode_scanner_init();
-    
-    // Initialize ultrasonic sensor
-    ultrasonic_init();
-    
-    // Initialize magnetometer
-    if (!magnetometer_init()) {
-        printf("WARNING: Magnetometer initialization failed\n");
-    }
 
-    // Initialize WiFi and MQTT (ADD THIS SECTION)
-    printf("[MQTT] Initializing WiFi...\n");
-    if (wifi_mqtt_init()) {
-        if (wifi_mqtt_connect()) {
-            if (mqtt_connect_broker()) {
-                mqtt_enabled = true;
-                printf("[MQTT] ✓ System ready\n");
-            }
-        }
-    }
-    if (!mqtt_enabled) {
-        printf("[MQTT] × MQTT disabled, continuing without networking\n");
-    }
+    // Encoders
+    encoder_init(); // sets GPIO directions and enables IRQs on pins (no callback)
 
-    // Buttons
-    gpio_init(PIN_BTN_DIR); gpio_set_dir(PIN_BTN_DIR, GPIO_IN); gpio_pull_up(PIN_BTN_DIR);
-    gpio_init(PIN_BTN_SPD); gpio_set_dir(PIN_BTN_SPD, GPIO_IN); gpio_pull_up(PIN_BTN_SPD);
+    // Buttons (active-low)
+    gpio_init(BUTTON_DIR); gpio_set_dir(BUTTON_DIR, GPIO_IN); gpio_pull_up(BUTTON_DIR);
+    gpio_init(BUTTON_SPD); gpio_set_dir(BUTTON_SPD, GPIO_IN); gpio_pull_up(BUTTON_SPD);
 
-    printf("FSM demo: 100 Hz | CPR=%.0f | wheel=%.1f mm\n", ENCODER_CPR, WHEEL_DIAMETER_MM);
+    // Register one ISR for both buttons and encoders
+    const uint32_t btn_edge = GPIO_IRQ_EDGE_FALL;
+#if ENCODER_COUNT_BOTH_EDGES
+    const uint32_t enc_edge = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
+#else
+    const uint32_t enc_edge = GPIO_IRQ_EDGE_RISE;
+#endif
+    // Enable events on all pins we care about, bind the unified callback
+    gpio_set_irq_enabled_with_callback(BUTTON_DIR, btn_edge, true, &gpio_isr_unified);
+    gpio_set_irq_enabled(BUTTON_SPD, btn_edge, true);
+    gpio_set_irq_enabled(LEFT_ENCODER_PIN,  enc_edge, true);
+    gpio_set_irq_enabled(RIGHT_ENCODER_PIN, enc_edge, true);
+
+    // Start motors
+    motor_set_speed_percent(speed, anticlockwise);
+
+    printf("FSM (interrupts for buttons + H206 encoders) ready.\n");
+    printf("GP21: toggle direction | GP20: randomize 40..100%%\n");
+    printf("Encoders on GPIO IRQs | CPR=%.0f | wheel=%.1fmm | mm/tick=%.2f\n",
+           ENCODER_CPR, WHEEL_DIAMETER_MM, encoder_mm_per_tick());
 }
 
 void fsm_step(void) {
-    static bool last_dir = true, last_spd = true;
-    static uint32_t last_dir_t = 0, last_spd_t = 0;
-    static uint32_t last_print_ms = 0;
-    static uint32_t last_line_print_ms = 0;
-    static uint32_t last_barcode_print_ms = 0;
-    static uint32_t last_ultrasonic_print_ms = 0;
-    static uint32_t last_mag_print_ms = 0;
-    static uint32_t last_mqtt_publish_ms = 0;  // ADD THIS
-
-    const float wheel_circ_mm = (float)M_PI * WHEEL_DIAMETER_MM;
-    const float mm_per_tick   = wheel_circ_mm / ENCODER_CPR;
-
-    bool dir_now = gpio_get(PIN_BTN_DIR);
-    bool spd_now = gpio_get(PIN_BTN_SPD);
-    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-
-    // Poll WiFi/MQTT (ADD THIS)
-    if (mqtt_enabled) {
-        wifi_mqtt_poll();
+    if (g_toggle_dir_req) {
+        g_toggle_dir_req = false;
+        anticlockwise = !anticlockwise;
+        motor_set_speed_percent(speed, anticlockwise);
+        printf("Direction: %s\n", anticlockwise ? "Anticlockwise" : "Clockwise");
+    }
+    if (g_change_speed_req) {
+        g_change_speed_req = false;
+        speed = 40 + (rand() % 61);
+        motor_set_speed_percent(speed, anticlockwise);
+        printf("Speed: %u%%\n", speed);
     }
 
-    // Button handling (same as before)
-    if (!dir_now && last_dir && (now_ms - last_dir_t > 200)) {
-        left_cmd  = -left_cmd;
-        right_cmd = -right_cmd;
-        last_dir_t = now_ms;
-    }
-    if (!spd_now && last_spd && (now_ms - last_spd_t > 200)) {
-        float s = fabsf(left_cmd);
-        s = (s < 0.35f) ? 0.60f : (s < 0.80f ? 0.90f : 0.30f);
-        left_cmd  = copysignf(s, left_cmd);
-        right_cmd = copysignf(s, right_cmd);
-        last_spd_t = now_ms;
-        
-        if (!ir_barcode_is_scanning()) {
-            ir_barcode_start_scan();
-        }
-    }
-    last_dir = dir_now; last_spd = spd_now;
-
-    // Obstacle detection
-    float obstacle_distance = ultrasonic_measure_cm();
-    if (!isnan(obstacle_distance) && obstacle_distance < 20.0f) {
-        printf("[OBSTACLE DETECTED] Distance: %.2f cm - STOPPING\n", obstacle_distance);
-        motor_stop();
-        left_cmd = right_cmd = 0.0f;
-    } else {
-        motor_set(left_cmd, right_cmd);
-    }
-
-    // Encoder reading
-    uint32_t dticks_L = encoder_read_and_clear(&encL);
-    uint32_t dticks_R = encoder_read_and_clear(&encR);
-
-    float dmm_L = dticks_L * mm_per_tick;
-    float dmm_R = dticks_R * mm_per_tick;
-    left_distance_mm  += dmm_L;
-    right_distance_mm += dmm_R;
-
-    float v_mm_s_L = dmm_L * (1000.0f / CONTROL_DT_MS);
-    float v_mm_s_R = dmm_R * (1000.0f / CONTROL_DT_MS);
-
-    // Stall detection (same as before)
-    if (fabsf(left_cmd) > STALL_PWM_THRESHOLD) {
-        stall_timer_ms_L = (dticks_L == 0) ? (stall_timer_ms_L + CONTROL_DT_MS) : 0;
-        if (stall_timer_ms_L >= STALL_WINDOW_MS) {
-            printf("[FAULT] Left motor stall, stopping.\n");
-            motor_stop();
-            left_cmd = right_cmd = 0.0f;
-        }
-    } else { stall_timer_ms_L = 0; }
-
-    if (fabsf(right_cmd) > STALL_PWM_THRESHOLD) {
-        stall_timer_ms_R = (dticks_R == 0) ? (stall_timer_ms_R + CONTROL_DT_MS) : 0;
-        if (stall_timer_ms_R >= STALL_WINDOW_MS) {
-            printf("[FAULT] Right motor stall, stopping.\n");
-            motor_stop();
-            left_cmd = right_cmd = 0.0f;
-        }
-    } else { stall_timer_ms_R = 0; }
-
-    ir_barcode_update();
-
-    // Telemetry printing (same as before)
-    if (now_ms - last_print_ms >= 500) {
-        printf("L: v=%.1fmm/s dist=%.0f | R: v=%.1fmm/s dist=%.0f\n",
-               v_mm_s_L, left_distance_mm, v_mm_s_R, right_distance_mm);
-        last_print_ms = now_ms;
-    }
-
-    if (now_ms - last_line_print_ms >= IR_LINE_PRINT_INTERVAL_MS) {
-        ir_line_print_data();
-        last_line_print_ms = now_ms;
-    }
-
-    if (now_ms - last_barcode_print_ms >= 2000) {
-        if (ir_barcode_is_scanning() || ir_barcode_get_data()->bar_count > 0) {
-            ir_barcode_print_data();
-        }
-        last_barcode_print_ms = now_ms;
-    }
-
-    if (now_ms - last_ultrasonic_print_ms >= ULTRASONIC_PRINT_INTERVAL_MS) {
-        ultrasonic_print_data();
-        last_ultrasonic_print_ms = now_ms;
-    }
-
-    if (now_ms - last_mag_print_ms >= MAG_PRINT_INTERVAL_MS) {
-        magnetometer_print_data();
-        last_mag_print_ms = now_ms;
-    }
-
-    // MQTT telemetry publishing (ADD THIS SECTION)
-    if (mqtt_enabled && mqtt_is_connected() && (now_ms - last_mqtt_publish_ms >= 1000)) {
-        magnetometer_data_t mag_data;
-        magnetometer_read_data(&mag_data);
-        
-        mqtt_publish_telemetry(
-            v_mm_s_L / 10.0f,           // Convert mm/s to cm/s
-            v_mm_s_R / 10.0f,
-            left_distance_mm / 10.0f,   // Convert mm to cm
-            right_distance_mm / 10.0f,
-            mag_data.heading,
-            mag_data.x, mag_data.y, mag_data.z
-        );
-        
-        last_mqtt_publish_ms = now_ms;
+    uint32_t now = now_ms();
+    if (now - last_print_ms >= DISPLAY_INTERVAL_MS) {
+        uint32_t lt = encoder_left_count();
+        uint32_t rt = encoder_right_count();
+        float lmm = encoder_ticks_to_mm(lt);
+        float rmm = encoder_ticks_to_mm(rt);
+        printf("--- Status ---\n");
+        printf("Speed: %u%% | Dir: %s\n", speed, anticlockwise ? "Anticlockwise" : "Clockwise");
+        printf("L: ticks=%lu dist=%.0fmm | R: ticks=%lu dist=%.0fmm\n",
+               (unsigned long)lt, lmm, (unsigned long)rt, rmm);
+        encoder_reset_counts();
+        last_print_ms = now;
     }
 }
