@@ -11,7 +11,7 @@
 #define LEFT_ENCODER_PIN   16
 #define RIGHT_ENCODER_PIN  26
 
-// -------- Direction calibration --------
+// ==== Direction calibration ====
 // If one side runs opposite when given the same command, flip its flag to 1.
 #define MOTOR_R_INVERT 1   // 0=normal, 1=invert RIGHT motor (M1)
 #define MOTOR_L_INVERT 0   // 0=normal, 1=invert LEFT  motor (M2)
