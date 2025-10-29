@@ -13,8 +13,8 @@
 
 // ==== Direction calibration ====
 // If one side runs opposite when given the same command, flip its flag to 1.
-#define MOTOR_R_INVERT 1   // 0=normal, 1=invert RIGHT motor (M1)
-#define MOTOR_L_INVERT 0   // 0=normal, 1=invert LEFT  motor (M2)
+#define MOTOR_R_INVERT 0   // 0=normal, 1=invert RIGHT motor (M1)
+#define MOTOR_L_INVERT 1   // 0=normal, 1=invert LEFT  motor (M2)
 
 // ==== Button pins ====
 #define BUTTON_DIR    21
@@ -80,3 +80,23 @@
 
 // ===== Magnetometer config =====
 #define MAG_PRINT_INTERVAL_MS           500
+#define MAG_FILTER_SIZE                 8         // Moving average filter size (default 8 samples)
+                                                  // Smaller value (4-6): Faster response, less smoothing
+                                                  // Larger value (10-16): More smoothing, slower response
+
+// ===== PID & velocity control =====
+#define SPEED_MAX_MM_S            75.0f    //90.0f // tune to your robot's realistic max
+#define PID_KP_VEL                0.7f     //0.5f  // start conservative, then tune
+#define PID_KI_VEL                2.10f    //1.1f
+#define PID_KD_VEL                0.001f    //0.001f    
+#define PID_OUT_MIN              (-100.0f) // mapped to motor % duty (signed)
+#define PID_OUT_MAX               (100.0f)
+#define PID_INTEG_MIN            (-200.0f) // anti-windup clamp
+#define PID_INTEG_MAX             (200.0f)
+
+// ===== IMU Heading Correction =====
+#define HEADING_KP                3.5f    //2.0f // Proportional gain for heading correction
+#define HEADING_KI                0.1f    //0.1f  // Integral gain for heading correction  
+#define HEADING_KD                2.0f    //0.0f   // Derivative gain for heading correction
+#define HEADING_DEADZONE          1.0f     // Ignore errors < 2° to avoid jitter
+#define MAX_HEADING_CORRECTION    15.0f    // Max ±20% duty adjustment for heading
