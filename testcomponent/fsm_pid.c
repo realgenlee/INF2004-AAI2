@@ -46,7 +46,7 @@ static uint32_t last_control_ms = 0;
 
 static pid_t pid_r, pid_l;
 
-#define VEL_WINDOW_MS 200
+#define VEL_WINDOW_MS 150
 static uint32_t vel_window_start = 0;
 static uint32_t vel_l_start = 0;
 static uint32_t vel_r_start = 0;
@@ -124,34 +124,43 @@ static float target_mm_s_from_ui(void) {
 }
 
 // Feedforward for LEFT wheel (with deadband compensation)
-static float feedforward_left(float target_mm_s) {
-    if (fabsf(target_mm_s) < 0.1f) return 0.0f;
-    
-    float speed_ratio = fabsf(target_mm_s) / SPEED_MAX_MM_S;
-    float pwm_range = MOTOR_L_MAX_PWM - MOTOR_L_MIN_PWM;
-    float base_pwm = MOTOR_L_MIN_PWM + (speed_ratio * pwm_range);
-    
-    // Add deadband compensation
-    float sign = (target_mm_s >= 0) ? 1.0f : -1.0f;
-    float compensated_pwm = base_pwm + (sign * MOTOR_DEADBAND_PERCENT);
-    
-    return sign * compensated_pwm;
+
+// Helper: map target speed to PWM% with fading deadband
+static inline float ff_from_speed(float target_mm_s, float min_pwm, float max_pwm) {
+    float s = target_mm_s;
+    float sign = (s >= 0.0f) ? 1.0f : -1.0f;
+    float mag = fabsf(s);
+
+    float base = (SPEED_MAX_MM_S > 1.0f) ? (mag / SPEED_MAX_MM_S) : 0.0f;
+    if (base < 0.0f) base = 0.0f;
+    if (base > 1.0f) base = 1.0f;
+
+    float pwm = min_pwm + (max_pwm - min_pwm) * base;
+
+    float fade = 1.0f - base;                     // 1 at zero speed → 0 at max
+    float add  = (MOTOR_DEADBAND_PERCENT * 0.4f) * fade; // use 40% of configured deadband
+    pwm += add;
+
+    return sign * pwm;
 }
+static float feedforward_left(float target_mm_s) {
+    float pwm = ff_from_speed(target_mm_s, MOTOR_L_MIN_PWM, MOTOR_L_MAX_PWM);
+    float limit = (pwm >= 0.0f) ? MOTOR_L_MAX_PWM : -MOTOR_L_MAX_PWM;
+    if (pwm >  limit) pwm =  limit;
+    if (pwm < -limit) pwm = -limit;
+    return pwm;
+}
+
 
 // Feedforward for RIGHT wheel (with deadband compensation)
 static float feedforward_right(float target_mm_s) {
-    if (fabsf(target_mm_s) < 0.1f) return 0.0f;
-    
-    float speed_ratio = fabsf(target_mm_s) / SPEED_MAX_MM_S;
-    float pwm_range = MOTOR_R_MAX_PWM - MOTOR_R_MIN_PWM;
-    float base_pwm = MOTOR_R_MIN_PWM + (speed_ratio * pwm_range);
-    
-    // Add deadband compensation
-    float sign = (target_mm_s >= 0) ? 1.0f : -1.0f;
-    float compensated_pwm = base_pwm + (sign * MOTOR_DEADBAND_PERCENT);
-    
-    return sign * compensated_pwm;
+    float pwm = ff_from_speed(target_mm_s, MOTOR_R_MIN_PWM, MOTOR_R_MAX_PWM);
+    float limit = (pwm >= 0.0f) ? MOTOR_R_MAX_PWM : -MOTOR_R_MAX_PWM;
+    if (pwm >  limit) pwm =  limit;
+    if (pwm < -limit) pwm = -limit;
+    return pwm;
 }
+
 
 void fsm_step(void) {
     uint32_t now = now_ms();
@@ -195,6 +204,23 @@ void fsm_step(void) {
         
         vel_l = (ticks_l * mm_per_tick) / actual_window_s;
         vel_r = (ticks_r * mm_per_tick) / actual_window_s;
+
+        // Exponential Moving Average smoothing
+        static bool vel_ema_init = false;
+        static float vel_l_ema = 0.0f, vel_r_ema = 0.0f;
+        const float alpha_vel = 0.40f; // lower = smoother
+
+        if (!vel_ema_init) {
+            vel_l_ema = vel_l;
+            vel_r_ema = vel_r;
+            vel_ema_init = true;
+        } else {
+            vel_l_ema = alpha_vel * vel_l + (1.0f - alpha_vel) * vel_l_ema;
+            vel_r_ema = alpha_vel * vel_r + (1.0f - alpha_vel) * vel_r_ema;
+        }
+        vel_l = vel_l_ema;
+        vel_r = vel_r_ema;
+
         
         total_dist_l_mm += ticks_l * mm_per_tick;
         total_dist_r_mm += ticks_r * mm_per_tick;
@@ -226,7 +252,24 @@ void fsm_step(void) {
     if (pwm_r > 100.0f) pwm_r = 100.0f;
     if (pwm_r < -100.0f) pwm_r = -100.0f;
 
-    motor_set_signed(pwm_r, pwm_l);
+    
+    // --- PWM slew-rate limiter ---
+    static float prev_pwm_l = 0.0f, prev_pwm_r = 0.0f;
+    const float MAX_PWM_STEP_PER_TICK = 5.0f; // ±2%% per control tick
+
+    float d_l = pwm_l - prev_pwm_l;
+    if (d_l >  MAX_PWM_STEP_PER_TICK) d_l =  MAX_PWM_STEP_PER_TICK;
+    if (d_l < -MAX_PWM_STEP_PER_TICK) d_l = -MAX_PWM_STEP_PER_TICK;
+    pwm_l = prev_pwm_l + d_l;
+
+    float d_r = pwm_r - prev_pwm_r;
+    if (d_r >  MAX_PWM_STEP_PER_TICK) d_r =  MAX_PWM_STEP_PER_TICK;
+    if (d_r < -MAX_PWM_STEP_PER_TICK) d_r = -MAX_PWM_STEP_PER_TICK;
+    pwm_r = prev_pwm_r + d_r;
+
+    prev_pwm_l = pwm_l;
+    prev_pwm_r = pwm_r;
+motor_set_signed(pwm_r, pwm_l);
 
     // ========== Status ==========
     if ((now - last_print_ms) >= DISPLAY_INTERVAL_MS) {

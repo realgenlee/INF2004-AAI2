@@ -79,42 +79,43 @@
 
 // ===== Magnetometer config =====
 #define MAG_PRINT_INTERVAL_MS           500
-#define MAG_FILTER_SIZE                 8
+#define MAG_FILTER_SIZE                 10    // Increased for smoother readings
 
 // ===== Motor Deadband Compensation =====
-#define MOTOR_DEADBAND_PERCENT  25.0f   // Minimum PWM to overcome friction
+#define MOTOR_DEADBAND_PERCENT     8.0f   // Minimum PWM to overcome friction
 
 // ===== Motor Characterization (PER WHEEL) =====
 // Left motor (adjust these based on testing)
 #define MOTOR_L_MIN_PWM      18.0f    // Minimum PWM to start moving
-#define MOTOR_L_MAX_PWM      26.0f    // PWM at max speed - tune this!
+#define MOTOR_L_MAX_PWM      35.0f    // PWM at max speed - tune this!
 
 // Right motor (adjust these based on testing)
 #define MOTOR_R_MIN_PWM      18.0f    // Minimum PWM to start moving
-#define MOTOR_R_MAX_PWM      26.0f    // PWM at max speed - tune this!
+#define MOTOR_R_MAX_PWM      35.0f    // PWM at max speed - tune this!
 
 // ===== PID Gains (PER WHEEL) =====
-#define SPEED_MAX_MM_S       60.0f
+#define SPEED_MAX_MM_S             350.0f
 
 // Left wheel PID gains
-#define PID_L_KP             0.7f     // Start with P-only
-#define PID_L_KI             0.0f     // Add after Kp is tuned
+#define PID_L_KP             0.3f     // Start with P-only
+#define PID_L_KI             0.01f     // Add after Kp is tuned
 #define PID_L_KD             0.0f     // Usually not needed
 
-// Right wheel PID gains (may differ from left!)
-#define PID_R_KP             0.8f     // Start with P-only
-#define PID_R_KI             0.0f     // Add after Kp is tuned
+// Right wheel PID gains
+#define PID_R_KP             0.35f     // Start with P-only
+#define PID_R_KI             0.01f     // Add after Kp is tuned
 #define PID_R_KD             0.0f     // Usually not needed
 
 // PID output limits (same for both)
-#define PID_OUT_MIN         (-30.0f)
-#define PID_OUT_MAX          (30.0f)
-#define PID_INTEG_MIN       (-20.0f)
-#define PID_INTEG_MAX        (20.0f)
+#define PID_OUT_MIN         (-40.0f)
+#define PID_OUT_MAX          (40.0f)
+#define PID_INTEG_MIN       (-5.0f)
+#define PID_INTEG_MAX        (5.0f)
 
 // ===== IMU Heading Correction =====
-#define HEADING_KP                0.0f
-#define HEADING_KI                0.0f
-#define HEADING_KD                0.0f
-#define HEADING_DEADZONE          1.0f
-#define MAX_HEADING_CORRECTION    15.0f
+// These control how aggressively the robot corrects its heading to drive straight
+#define HEADING_KP                1.5f     // Increased for stronger correction
+#define HEADING_KI                0.0f    // Increased slightly
+#define HEADING_KD                0.0f     // Increased damping
+#define HEADING_DEADZONE          1.0f     // Keep sensitive
+#define MAX_HEADING_CORRECTION    15.0f    // Increased max correction
