@@ -3,55 +3,67 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <math.h>
 #include "config.h"
 #include "drivers/motor.h"
 #include "drivers/encoder.h"
 #include "control/pid.h"
 #include "fsm.h"
 
-// ---- Unified GPIO ISR for buttons + encoders ----
+// ---- GPIO ISR ----
 static volatile bool g_toggle_dir_req = false;
 static volatile bool g_change_speed_req = false;
 static volatile uint32_t g_last_dir_ms = 0;
 static volatile uint32_t g_last_spd_ms = 0;
 
-static inline uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
+static inline uint32_t now_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
+}
 
 static void gpio_isr_unified(uint gpio, uint32_t events) {
     encoder_on_gpio_irq(gpio, events);
+    
     uint32_t t = now_ms();
     if (gpio == BUTTON_DIR && (events & GPIO_IRQ_EDGE_FALL)) {
-        if ((t - g_last_dir_ms) > DEBOUNCE_MS) { g_toggle_dir_req = true; g_last_dir_ms = t; }
+        if ((t - g_last_dir_ms) > DEBOUNCE_MS) { 
+            g_toggle_dir_req = true; 
+            g_last_dir_ms = t; 
+        }
     }
     if (gpio == BUTTON_SPD && (events & GPIO_IRQ_EDGE_FALL)) {
-        if ((t - g_last_spd_ms) > DEBOUNCE_MS) { g_change_speed_req = true; g_last_spd_ms = t; }
+        if ((t - g_last_spd_ms) > DEBOUNCE_MS) { 
+            g_change_speed_req = true; 
+            g_last_spd_ms = t; 
+        }
     }
 }
 
-// ---- App state ----
-static bool anticlockwise = false;     // your existing "direction" flag
-static uint speed_pct = 70;            // UI setpoint 40..100%
+// ---- State ----
+static bool forward = true;
+static uint speed_pct = 50;
 static uint32_t last_print_ms = 0;
+static uint32_t last_control_ms = 0;
 
-// PID controllers (one per wheel); outputs map to signed duty [-100..100]
 static pid_t pid_r, pid_l;
 
-// cached for velocity estimate
-static int32_t prev_l_ticks = 0, prev_r_ticks = 0;
+#define VEL_WINDOW_MS 200
+static uint32_t vel_window_start = 0;
+static uint32_t vel_l_start = 0;
+static uint32_t vel_r_start = 0;
+static float vel_l = 0.0f;
+static float vel_r = 0.0f;
 
-// convenience
-static inline float dt_s(void) { return CONTROL_DT_MS / 1000.0f; }
+static float total_dist_l_mm = 0.0f;
+static float total_dist_r_mm = 0.0f;
 
 void fsm_init(void) {
     stdio_init_all();
     motor_init_all();
     encoder_init();
 
-    // Buttons
     gpio_init(BUTTON_DIR); gpio_set_dir(BUTTON_DIR, GPIO_IN); gpio_pull_up(BUTTON_DIR);
     gpio_init(BUTTON_SPD); gpio_set_dir(BUTTON_SPD, GPIO_IN); gpio_pull_up(BUTTON_SPD);
 
-    // Register unified ISR
 #if ENCODER_COUNT_BOTH_EDGES
     const uint32_t enc_edge = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
 #else
@@ -62,72 +74,219 @@ void fsm_init(void) {
     gpio_set_irq_enabled(LEFT_ENCODER_PIN,  enc_edge, true);
     gpio_set_irq_enabled(RIGHT_ENCODER_PIN, enc_edge, true);
 
-    // PID setup
-    pid_init(&pid_r, PID_KP_VEL, PID_KI_VEL, PID_KD_VEL, dt_s(),
+    float dt = 0.01f;
+    
+    // Initialize LEFT wheel PID with its own gains
+    pid_init(&pid_l, PID_L_KP, PID_L_KI, PID_L_KD, dt,
              PID_OUT_MIN, PID_OUT_MAX, PID_INTEG_MIN, PID_INTEG_MAX);
-    pid_init(&pid_l, PID_KP_VEL, PID_KI_VEL, PID_KD_VEL, dt_s(),
+    
+    // Initialize RIGHT wheel PID with its own gains
+    pid_init(&pid_r, PID_R_KP, PID_R_KI, PID_R_KD, dt,
              PID_OUT_MIN, PID_OUT_MAX, PID_INTEG_MIN, PID_INTEG_MAX);
 
-    // start in open-loop just to be safe (0 duty)
     motor_set_signed(0, 0);
 
-    // seed tick baselines
-    prev_l_ticks = (int32_t)encoder_left_count();
-    prev_r_ticks = (int32_t)encoder_right_count();
+    vel_l_start = encoder_left_count();
+    vel_r_start = encoder_right_count();
+    vel_window_start = now_ms();
+    last_control_ms = vel_window_start;
 
-    printf("FSM+PID ready. CPR=%.0f | wheel=%.1fmm | mm/tick=%.2f | dt=%.3fs\n",
-           ENCODER_CPR, WHEEL_DIAMETER_MM, encoder_mm_per_tick(), dt_s());
-    printf("GP21 toggle direction | GP20 randomize 40..100%%\n");
+    printf("\n╔════════════════════════════════════════════════════════╗\n");
+    printf("║  PER-WHEEL PID WITH FEEDFORWARD + DEADBAND COMPENSATION║\n");
+    printf("╚════════════════════════════════════════════════════════╝\n\n");
+    printf("Encoder: CPR=%.0f | Wheel=%.1fmm | Resolution=%.2fmm\n",
+           ENCODER_CPR, WHEEL_DIAMETER_MM, encoder_mm_per_tick());
+    printf("Velocity window: %dms\n", VEL_WINDOW_MS);
+    printf("Deadband compensation: %.0f%%\n\n", MOTOR_DEADBAND_PERCENT);
+    
+    printf("┌─ LEFT MOTOR ────────────────────────────────────┐\n");
+    printf("│ Feedforward: %.1f%% to %.1f%%                    │\n", 
+           MOTOR_L_MIN_PWM, MOTOR_L_MAX_PWM);
+    printf("│ PID: Kp=%.2f Ki=%.3f Kd=%.3f                   │\n", 
+           PID_L_KP, PID_L_KI, PID_L_KD);
+    printf("└─────────────────────────────────────────────────┘\n\n");
+    
+    printf("┌─ RIGHT MOTOR ───────────────────────────────────┐\n");
+    printf("│ Feedforward: %.1f%% to %.1f%%                    │\n", 
+           MOTOR_R_MIN_PWM, MOTOR_R_MAX_PWM);
+    printf("│ PID: Kp=%.2f Ki=%.3f Kd=%.3f                   │\n", 
+           PID_R_KP, PID_R_KI, PID_R_KD);
+    printf("└─────────────────────────────────────────────────┘\n\n");
+    
+    printf("Target Speed: %u%% = %.1f mm/s\n", 
+           speed_pct, SPEED_MAX_MM_S * speed_pct / 100.0f);
+    printf("GP21=dir | GP20=speed\n\n");
 }
 
-// helper: UI % -> target wheel speed (mm/s), signed by direction
 static float target_mm_s_from_ui(void) {
-    float sign = anticlockwise ? +1.0f : -1.0f;  // keep your current forward/back mapping
+    float sign = forward ? +1.0f : -1.0f;
     return sign * (SPEED_MAX_MM_S * (speed_pct / 100.0f));
 }
 
+// Feedforward for LEFT wheel (with deadband compensation)
+static float feedforward_left(float target_mm_s) {
+    if (fabsf(target_mm_s) < 0.1f) return 0.0f;
+    
+    float speed_ratio = fabsf(target_mm_s) / SPEED_MAX_MM_S;
+    float pwm_range = MOTOR_L_MAX_PWM - MOTOR_L_MIN_PWM;
+    float base_pwm = MOTOR_L_MIN_PWM + (speed_ratio * pwm_range);
+    
+    // Add deadband compensation
+    float sign = (target_mm_s >= 0) ? 1.0f : -1.0f;
+    float compensated_pwm = base_pwm + (sign * MOTOR_DEADBAND_PERCENT);
+    
+    return sign * compensated_pwm;
+}
+
+// Feedforward for RIGHT wheel (with deadband compensation)
+static float feedforward_right(float target_mm_s) {
+    if (fabsf(target_mm_s) < 0.1f) return 0.0f;
+    
+    float speed_ratio = fabsf(target_mm_s) / SPEED_MAX_MM_S;
+    float pwm_range = MOTOR_R_MAX_PWM - MOTOR_R_MIN_PWM;
+    float base_pwm = MOTOR_R_MIN_PWM + (speed_ratio * pwm_range);
+    
+    // Add deadband compensation
+    float sign = (target_mm_s >= 0) ? 1.0f : -1.0f;
+    float compensated_pwm = base_pwm + (sign * MOTOR_DEADBAND_PERCENT);
+    
+    return sign * compensated_pwm;
+}
+
 void fsm_step(void) {
+    uint32_t now = now_ms();
+    
+    uint32_t dt_ms = now - last_control_ms;
+    if (dt_ms < 5) return;
+    last_control_ms = now;
+    float dt_s = dt_ms / 1000.0f;
+    
+    // ========== Buttons ==========
     if (g_toggle_dir_req) {
         g_toggle_dir_req = false;
-        anticlockwise = !anticlockwise;
-        pid_reset(&pid_r); pid_reset(&pid_l);  // avoid kick
-        printf("Direction: %s\n", anticlockwise ? "Anticlockwise" : "Clockwise");
+        forward = !forward;
+        pid_reset(&pid_r); 
+        pid_reset(&pid_l);
+        vel_l_start = encoder_left_count();
+        vel_r_start = encoder_right_count();
+        vel_window_start = now;
+        vel_l = vel_r = 0.0f;
+        printf("\n>>> DIRECTION: %s <<<\n\n", forward ? "FWD" : "REV");
     }
     if (g_change_speed_req) {
         g_change_speed_req = false;
         speed_pct = 40 + (rand() % 61);
-        printf("Speed setpoint: %u%%\n", speed_pct);
+        printf("\n>>> SPEED: %u%% = %.1f mm/s <<<\n\n", 
+               speed_pct, SPEED_MAX_MM_S * speed_pct / 100.0f);
     }
 
-    // --- Measure wheel speeds from encoder deltas ---
-    int32_t cur_l = (int32_t)encoder_left_count();
-    int32_t cur_r = (int32_t)encoder_right_count();
-    int32_t dlt   = cur_l - prev_l_ticks;
-    int32_t drt   = cur_r - prev_r_ticks;
-    prev_l_ticks = cur_l;
-    prev_r_ticks = cur_r;
+    // ========== Update Velocity ==========
+    uint32_t window_elapsed = now - vel_window_start;
+    
+    if (window_elapsed >= VEL_WINDOW_MS) {
+        uint32_t cur_l = encoder_left_count();
+        uint32_t cur_r = encoder_right_count();
+        
+        int32_t ticks_l = (int32_t)(cur_l - vel_l_start);
+        int32_t ticks_r = (int32_t)(cur_r - vel_r_start);
+        
+        float actual_window_s = window_elapsed / 1000.0f;
+        float mm_per_tick = encoder_mm_per_tick();
+        
+        vel_l = (ticks_l * mm_per_tick) / actual_window_s;
+        vel_r = (ticks_r * mm_per_tick) / actual_window_s;
+        
+        total_dist_l_mm += ticks_l * mm_per_tick;
+        total_dist_r_mm += ticks_r * mm_per_tick;
+        
+        vel_l_start = cur_l;
+        vel_r_start = cur_r;
+        vel_window_start = now;
+    }
 
-    float mm_per_tick = encoder_mm_per_tick();
-    float meas_l_mm_s = (dlt * mm_per_tick) / dt_s();
-    float meas_r_mm_s = (drt * mm_per_tick) / dt_s();
+    // ========== Control: Feedforward (with deadband) + PID ==========
+    pid_l.dt_s = dt_s;
+    pid_r.dt_s = dt_s;
+    
+    float target = target_mm_s_from_ui();
+    
+    // Left wheel: Feedforward (includes deadband) + PID correction
+    float ff_l = feedforward_left(target);
+    float pid_out_l = pid_update(&pid_l, target, vel_l);
+    float pwm_l = ff_l + pid_out_l;
+    
+    // Right wheel: Feedforward (includes deadband) + PID correction
+    float ff_r = feedforward_right(target);
+    float pid_out_r = pid_update(&pid_r, target, vel_r);
+    float pwm_r = ff_r + pid_out_r;
+    
+    // Clamp to limits
+    if (pwm_l > 100.0f) pwm_l = 100.0f;
+    if (pwm_l < -100.0f) pwm_l = -100.0f;
+    if (pwm_r > 100.0f) pwm_r = 100.0f;
+    if (pwm_r < -100.0f) pwm_r = -100.0f;
 
-    // --- PID control: same target both wheels for now ---
-    float tgt_mm_s = target_mm_s_from_ui();
-    float u_r = pid_update(&pid_r, tgt_mm_s, meas_r_mm_s);  // [-100..100] duty %
-    float u_l = pid_update(&pid_l, tgt_mm_s, meas_l_mm_s);
+    motor_set_signed(pwm_r, pwm_l);
 
-    // --- Drive motors with signed duty (handles inversion internally) ---
-    motor_set_signed(u_r, u_l);
-
-    // --- Periodic status print ---
-    uint32_t t = now_ms();
-    if (t - last_print_ms >= DISPLAY_INTERVAL_MS) {
-        printf("--- Status ---\n");
-        printf("Set: %.0f mm/s | L: %.0f | R: %.0f | Out L/R: %.0f / %.0f\n",
-               tgt_mm_s, meas_l_mm_s, meas_r_mm_s, u_l, u_r);
-        last_print_ms = t;
-        // (optional) zero the long counters to keep numbers small:
-        encoder_reset_counts();
-        prev_l_ticks = prev_r_ticks = 0;
+    // ========== Status ==========
+    if ((now - last_print_ms) >= DISPLAY_INTERVAL_MS) {
+        float err_l = target - vel_l;
+        float err_r = target - vel_r;
+        
+        printf("╔══════════════════════════════════════════════════════════╗\n");
+        printf("║ Target: %+.1f mm/s (%u%% %s)                            \n", 
+               target, speed_pct, forward ? "FWD" : "REV");
+        printf("╠══════════════════════════════════════════════════════════╣\n");
+        
+        // Left wheel
+        printf("║ LEFT:  Vel=%+5.1f | Err=%+5.1f | FF=%+4.1f%% | PID=%+5.1f   ║\n", 
+               vel_l, err_l, ff_l, pid_out_l);
+        printf("║        PWM=%+5.1f%% | I=%+5.1f | Dist=%.0fmm             ║\n",
+               pwm_l, pid_l.integ, total_dist_l_mm);
+        
+        printf("╟──────────────────────────────────────────────────────────╢\n");
+        
+        // Right wheel
+        printf("║ RIGHT: Vel=%+5.1f | Err=%+5.1f | FF=%+4.1f%% | PID=%+5.1f   ║\n", 
+               vel_r, err_r, ff_r, pid_out_r);
+        printf("║        PWM=%+5.1f%% | I=%+5.1f | Dist=%.0fmm             ║\n",
+               pwm_r, pid_r.integ, total_dist_r_mm);
+        
+        printf("╟──────────────────────────────────────────────────────────╢\n");
+        
+        // Tuning hints
+        float avg_err = (fabsf(err_l) + fabsf(err_r)) / 2.0f;
+        
+        if (avg_err < 5.0f) {
+            printf("║ ✅ Excellent! Avg error <5mm/s - Well tuned!             ║\n");
+        } else if (avg_err > 15.0f) {
+            printf("║ ⚠️  Large error! Check feedforward first:                ║\n");
+            if (fabsf(err_l) > 15.0f) {
+                if (err_l > 0) {
+                    printf("║    Left too slow → Increase MOTOR_L_MAX_PWM (%.1f)       ║\n", MOTOR_L_MAX_PWM);
+                } else {
+                    printf("║    Left too fast → Decrease MOTOR_L_MAX_PWM (%.1f)       ║\n", MOTOR_L_MAX_PWM);
+                }
+            }
+            if (fabsf(err_r) > 15.0f) {
+                if (err_r > 0) {
+                    printf("║    Right too slow → Increase MOTOR_R_MAX_PWM (%.1f)      ║\n", MOTOR_R_MAX_PWM);
+                } else {
+                    printf("║    Right too fast → Decrease MOTOR_R_MAX_PWM (%.1f)      ║\n", MOTOR_R_MAX_PWM);
+                }
+            }
+        } else {
+            printf("║ 💡 Feedforward OK. Now tune PID:                         ║\n");
+            if (fabsf(err_l) > 5.0f) {
+                printf("║    Left error=%.1f → Adjust PID_L_KP (now %.2f)          ║\n", err_l, PID_L_KP);
+            }
+            if (fabsf(err_r) > 5.0f) {
+                printf("║    Right error=%.1f → Adjust PID_R_KP (now %.2f)         ║\n", err_r, PID_R_KP);
+            }
+        }
+        
+        printf("╚══════════════════════════════════════════════════════════╝\n\n");
+        
+        last_print_ms = now;
     }
 }
