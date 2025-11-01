@@ -114,8 +114,8 @@
 
 // ===== IMU Heading Correction =====
 // These control how aggressively the robot corrects its heading to drive straight
-#define HEADING_KP                1.5f     // Increased for stronger correction
-#define HEADING_KI                0.0f    // Increased slightly
-#define HEADING_KD                0.0f     // Increased damping
+#define HEADING_KP                2.5f     // Increased for stronger correction
+#define HEADING_KI                0.4f    // Increased slightly
+#define HEADING_KD                0.5f     // Increased damping
 #define HEADING_DEADZONE          1.0f     // Keep sensitive
-#define MAX_HEADING_CORRECTION    15.0f    // Increased max correction
+#define MAX_HEADING_CORRECTION   30.0f    // Increased max correction
