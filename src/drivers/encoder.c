@@ -41,7 +41,7 @@ void encoder_init(void) {
     enc_gpio_init(RIGHT_ENCODER_PIN);
 
 #if ENCODER_OWNS_IRQ_CALLBACK
-    // Register the global IRQ callback ourselves
+
 #if ENCODER_COUNT_BOTH_EDGES
     const uint32_t edge_mask = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
 #else
@@ -50,7 +50,7 @@ void encoder_init(void) {
     gpio_set_irq_enabled_with_callback(LEFT_ENCODER_PIN,  edge_mask, true, &encoder_irq_global);
     gpio_set_irq_enabled(RIGHT_ENCODER_PIN, edge_mask, true);
 #else
-    // Enable IRQs on pins only; app must call encoder_on_gpio_irq() from its global ISR
+
 #if ENCODER_COUNT_BOTH_EDGES
     const uint32_t edge_mask = GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL;
 #else

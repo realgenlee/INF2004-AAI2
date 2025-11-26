@@ -5,15 +5,12 @@
 #include "lwip/apps/mqtt.h"
 #include "networking/wifi_mqtt.h"
 
-// MQTT client instance
 static mqtt_client_t *mqtt_client = NULL;
 static bool mqtt_connected = false;
 static int  mqtt_reconnect_failures = 0;
 
-// User callback (optional)
 static mqtt_msg_cb_t user_msg_cb = NULL;
 
-// Buffer to accumulate chunked inbound payloads
 #define INBUF_MAX 512
 static char     in_topic[128];
 static uint8_t  in_buf[INBUF_MAX];
@@ -22,7 +19,6 @@ static size_t   in_len = 0;
 // ============================================================================
 // Internal helpers
 // ============================================================================
-
 static void inbuf_reset(void) {
     in_topic[0] = '\0';
     in_len = 0;
@@ -37,7 +33,6 @@ static void safe_copy_topic(const char *topic) {
 // ============================================================================
 // MQTT Callbacks
 // ============================================================================
-
 static void mqtt_connection_cb(mqtt_client_t *client, void *arg,
                                mqtt_connection_status_t status) {
     if (status == MQTT_CONNECT_ACCEPTED) {
@@ -52,14 +47,11 @@ static void mqtt_connection_cb(mqtt_client_t *client, void *arg,
     }
 }
 
-// Called once at start of an incoming publish; topic is valid here.
 static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len) {
-    printf("[MQTT] << topic=%s total_len=%lu\n", topic ? topic : "(null)", (unsigned long)tot_len);
     inbuf_reset();
     safe_copy_topic(topic);
 }
 
-// Called for each chunk of data. When flags has MQTT_DATA_FLAG_LAST, payload is complete.
 static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags) {
     if (!data || len == 0) return;
 
@@ -73,26 +65,19 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
     }
 
     if (flags & MQTT_DATA_FLAG_LAST) {
-        // Ensure NUL-termination if user treats as string (safe)
         if (in_len < INBUF_MAX) {
             in_buf[in_len] = 0;
         } else {
             in_buf[INBUF_MAX - 1] = 0;
         }
 
-        // Print a preview for debugging
-        printf("[MQTT] << payload(%zu): ", in_len);
         size_t preview = (in_len < 80) ? in_len : 80;
         for (size_t i = 0; i < preview; i++) putchar((char)in_buf[i]);
-        if (in_len > preview) printf("...(+%zu)", in_len - preview);
-        printf("\n");
 
-        // Invoke user callback if set
         if (user_msg_cb) {
             user_msg_cb(in_topic, in_buf, in_len);
         }
 
-        // Reset for next message
         inbuf_reset();
     }
 }
@@ -108,10 +93,8 @@ static void mqtt_pub_request_cb(void *arg, err_t result) {
 // ============================================================================
 
 bool wifi_mqtt_init(void) {
-    printf("[WiFi] Initializing CYW43 chip...\n");
 
     if (cyw43_arch_init()) {
-        printf("[WiFi] × CYW43 init failed\n");
         return false;
     }
 
@@ -121,7 +104,6 @@ bool wifi_mqtt_init(void) {
 }
 
 bool wifi_mqtt_connect(void) {
-    printf("[WiFi] → Connecting to SSID: %s\n", WIFI_SSID);
 
     int result = cyw43_arch_wifi_connect_timeout_ms(
         WIFI_SSID,
@@ -132,7 +114,6 @@ bool wifi_mqtt_connect(void) {
 
     if (result != 0) {
         printf("[WiFi] × Connection failed (code: %d)\n", result);
-        printf("[WiFi] Check: SSID, password, 2.4GHz network, WPA2\n");
         return false;
     }
 
@@ -152,19 +133,16 @@ bool mqtt_connect_broker(void) {
         return false;
     }
 
-    // Setup MQTT client info
     struct mqtt_connect_client_info_t ci;
     memset(&ci, 0, sizeof(ci));
     ci.client_id = MQTT_CLIENT_ID;
     ci.keep_alive = 60;
 
-    // Set callbacks
     mqtt_set_inpub_callback(mqtt_client,
                             mqtt_incoming_publish_cb,
                             mqtt_incoming_data_cb,
                             NULL);
 
-    // Parse broker IP
     ip_addr_t broker_ip;
     if (!ip4addr_aton(MQTT_BROKER_IP, &broker_ip)) {
         printf("[MQTT] × Invalid broker IP: %s\n", MQTT_BROKER_IP);
@@ -174,7 +152,6 @@ bool mqtt_connect_broker(void) {
     printf("[MQTT] → Connecting to broker %s:%d\n",
            MQTT_BROKER_IP, MQTT_BROKER_PORT);
 
-    // Connect to broker
     err_t err = mqtt_client_connect(mqtt_client,
                                     &broker_ip,
                                     MQTT_BROKER_PORT,
@@ -187,8 +164,7 @@ bool mqtt_connect_broker(void) {
         return false;
     }
 
-    // Wait for connection (with timeout)
-    int timeout = 100; // ~10 seconds
+    int timeout = 100;
     while (!mqtt_connected && timeout-- > 0) {
         cyw43_arch_poll();
         sleep_ms(100);
@@ -207,7 +183,6 @@ bool mqtt_publish_telemetry(float left_speed, float right_speed,
                             int16_t accel_y,  int16_t accel_z) {
     if (!mqtt_connected) return false;
 
-    // Build compact JSON telemetry
     char buffer[256];
     int len = snprintf(buffer, sizeof(buffer),
         "{\"ls\":%.1f,\"rs\":%.1f,\"ld\":%.1f,\"rd\":%.1f,"
@@ -224,8 +199,8 @@ bool mqtt_publish_telemetry(float left_speed, float right_speed,
                              MQTT_PUB_TOPIC,
                              buffer,
                              (u16_t)len,
-                             0,  // QoS 0
-                             0,  // Not retained
+                             0,
+                             0,
                              mqtt_pub_request_cb,
                              NULL);
 
@@ -234,14 +209,12 @@ bool mqtt_publish_telemetry(float left_speed, float right_speed,
 
 bool mqtt_publish_ping(int count) {
     if (!mqtt_connected) {
-        printf("[MQTT] × Not connected, cannot publish ping\n");
         return false;
     }
 
     char message[64];
     snprintf(message, sizeof(message), "PING #%d from Pico W", count);
 
-    printf("[MQTT] >> Publishing ping #%d\n", count);
 
     err_t err = mqtt_publish(mqtt_client,
                              "robot/ping",
@@ -270,7 +243,7 @@ bool mqtt_publish_text(const char *topic, const char *text, int qos, bool retain
 
 bool mqtt_publish_raw(const char *topic, const uint8_t *bytes, size_t len, int qos, bool retain) {
     if (!mqtt_connected || !topic || !bytes || len == 0) return false;
-    if (len > 0xFFFF) len = 0xFFFF; // lwIP expects u16_t length
+    if (len > 0xFFFF) len = 0xFFFF;
     err_t err = mqtt_publish(mqtt_client,
                              topic,
                              bytes,
@@ -286,7 +259,6 @@ bool mqtt_subscribe_topic(const char *topic, int qos) {
     if (!mqtt_connected || !topic) return false;
     err_t err = mqtt_subscribe(mqtt_client, topic, (u8_t)(qos & 0x3), NULL, NULL);
     if (err == ERR_OK) {
-        printf("[MQTT] ✓ Subscribed to %s (QoS %d)\n", topic, qos);
         return true;
     } else {
         printf("[MQTT] × Subscribe failed (%s): %d\n", topic, err);
@@ -301,12 +273,10 @@ void mqtt_set_message_cb(mqtt_msg_cb_t cb) {
 void wifi_mqtt_poll(void) {
     cyw43_arch_poll();
 
-    // Handle reconnection if disconnected
     if (!mqtt_connected && mqtt_reconnect_failures < MQTT_MAX_RECONNECT) {
         static uint32_t last_try = 0;
         uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - last_try > 2000) { // retry every ~2s
-            printf("[MQTT] ! Attempting reconnect...\n");
+        if (now - last_try > 2000) {
             (void)mqtt_connect_broker();
             last_try = now;
         }
@@ -357,7 +327,6 @@ bool mqtt_publish_barcode(const char* barcode_value,
     return (err == ERR_OK);
 }
 
-// Publish IMU data to robot/compass topic
 bool mqtt_publish_imu(float heading, int16_t mx, int16_t my, int16_t mz,
                      int16_t ax, int16_t ay, int16_t az) {
     if (!mqtt_is_connected()) return false;
@@ -370,7 +339,6 @@ bool mqtt_publish_imu(float heading, int16_t mx, int16_t my, int16_t mz,
     return mqtt_publish_text("robot/compass", payload, 0, false);
 }
 
-// Publish motor data to robot/telemetry topic
 bool mqtt_publish_motors(float left_speed, float right_speed,
                         float left_dist, float right_dist) {
     if (!mqtt_is_connected()) return false;
@@ -383,7 +351,6 @@ bool mqtt_publish_motors(float left_speed, float right_speed,
     return mqtt_publish_text("robot/telemetry", payload, 0, false);
 }
 
-// Publish PID data to robot/pid topic
 bool mqtt_publish_pid(float kp, float ki, float kd, float error, float output) {
     if (!mqtt_is_connected()) return false;
     
@@ -395,7 +362,6 @@ bool mqtt_publish_pid(float kp, float ki, float kd, float error, float output) {
     return mqtt_publish_text("robot/pid", payload, 0, false);
 }
 
-// Publish state machine data to robot/state topic
 bool mqtt_publish_state(const char* state, const char* command) {
     if (!mqtt_is_connected()) return false;
     
@@ -408,7 +374,6 @@ bool mqtt_publish_state(const char* state, const char* command) {
     return mqtt_publish_text("robot/state", payload, 0, false);
 }
 
-// Publish obstacle detection data to robot/obstacle topic
 bool mqtt_publish_obstacle(float distance, int servo_angle,
                           const char* chosen_path, const char* status) {
     if (!mqtt_is_connected()) return false;

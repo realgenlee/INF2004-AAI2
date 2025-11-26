@@ -1,6 +1,5 @@
 #include "control/pid.h"
 
-// clamp helper
 static inline float clampf(float v, float lo, float hi) {
     return (v < lo) ? lo : (v > hi) ? hi : v;
 }
@@ -27,10 +26,8 @@ void pid_set_gains(pid_t* p, float kp, float ki, float kd) {
 float pid_update(pid_t* p, float setpoint, float measurement) {
     float err = setpoint - measurement;
 
-    // derivative (on error)
     float derr = p->first ? 0.0f : (err - p->prev_err) / p->dt_s;
 
-    // integrator with clamping (simple anti-windup)
     p->integ += err * p->dt_s;
     p->integ = clampf(p->integ, p->integ_min, p->integ_max);
 

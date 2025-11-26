@@ -6,11 +6,8 @@
 #include "drivers/ir_line_follower.h"
 
 void ir_line_follower_init(void) {
-    // Note: adc_init() should only be called once globally
-    // If not already initialized, call it here
     adc_gpio_init(IR_LINE_ADC_GPIO);
     
-    // Initialize digital input
     gpio_init(IR_LINE_DIGITAL_GPIO);
     gpio_set_dir(IR_LINE_DIGITAL_GPIO, GPIO_IN);
     gpio_disable_pulls(IR_LINE_DIGITAL_GPIO);
@@ -29,7 +26,7 @@ uint16_t ir_line_read_adc_averaged(int samples) {
     uint32_t acc = 0;
     for (int i = 0; i < samples; ++i) {
         acc += ir_line_read_adc_raw();
-        sleep_us(100);  // Small delay between samples
+        sleep_us(100);
     }
     return (uint16_t)(acc / (uint32_t)samples);
 }
@@ -45,15 +42,13 @@ const char* ir_line_classify_surface(uint16_t raw, uint16_t threshold) {
 bool ir_line_is_on_line(void) {
     uint16_t raw = ir_line_read_adc_averaged(4);
     const char* surface = ir_line_classify_surface(raw, IR_LINE_THRESHOLD);
-    return (surface[0] == 'B'); // 'B' for BLACK
+    return (surface[0] == 'B');
 }
 
 float ir_line_get_normalized_position(void) {
-    // Returns 0.0 (white) to 1.0 (black)
     uint16_t raw = ir_line_read_adc_averaged(4);
     float normalized = (float)raw / 4095.0f;
     
-    // If white reads high, invert
     if (IR_LINE_WHITE_HIGH) {
         normalized = 1.0f - normalized;
     }

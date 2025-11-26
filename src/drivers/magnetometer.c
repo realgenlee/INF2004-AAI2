@@ -5,7 +5,6 @@
 #include "config.h"
 #include "drivers/magnetometer.h"
 
-// LSM303 Magnetometer Registers
 #define LSM303_REG_CRA_M        0x00    // Control Register A
 #define LSM303_REG_CRB_M        0x01    // Control Register B
 #define LSM303_REG_MR_M         0x02    // Mode Register
@@ -31,7 +30,7 @@ static int16_t filter_x[MAG_FILTER_SIZE] = {0};
 static int16_t filter_y[MAG_FILTER_SIZE] = {0};
 static int16_t filter_z[MAG_FILTER_SIZE] = {0};
 static uint8_t filter_index = 0;
-static uint8_t filter_count = 0;  // Tracks how many samples we've collected
+static uint8_t filter_count = 0;
 static bool filter_initialized = false;
 
 // Write to magnetometer register
@@ -127,10 +126,6 @@ bool magnetometer_init(void) {
 
     // Reset the moving average filter
     magnetometer_reset_filter();
-
-    printf("Magnetometer initialized: I2C%d, SDA=GP%d, SCL=GP%d\n",
-           i2c_hw_index(I2C_PORT), I2C_SDA_PIN, I2C_SCL_PIN);
-    printf("Moving average filter: %d samples\n", MAG_FILTER_SIZE);
 
     return true;
 }
@@ -273,7 +268,6 @@ void magnetometer_start_calibration(void) {
     mag_min_x = mag_min_y = mag_min_z = 32767;
     mag_max_x = mag_max_y = mag_max_z = -32768;
     calibration_active = true;
-    printf("[MAG] Calibration started - rotate sensor in all directions\n");
 }
 
 void magnetometer_update_calibration(int16_t mx, int16_t my, int16_t mz) {
@@ -289,8 +283,4 @@ void magnetometer_update_calibration(int16_t mx, int16_t my, int16_t mz) {
 
 void magnetometer_finish_calibration(void) {
     calibration_active = false;
-    printf("[MAG] Calibration complete:\n");
-    printf("  X: [%d, %d]\n", mag_min_x, mag_max_x);
-    printf("  Y: [%d, %d]\n", mag_min_y, mag_max_y);
-    printf("  Z: [%d, %d]\n", mag_min_z, mag_max_z);
 }

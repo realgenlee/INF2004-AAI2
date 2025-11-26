@@ -1,7 +1,6 @@
 #ifndef _LWIPOPTS_H
 #define _LWIPOPTS_H
 
-// Common lwIP options
 #define NO_SYS                      1
 #define LWIP_SOCKET                 0
 #define MEM_LIBC_MALLOC             0
@@ -38,16 +37,12 @@
 // ============================================================
 #define LWIP_MQTT                   1
 
-// Fix for sys_timeout panic - increase timeout pool
 #define MEMP_NUM_SYS_TIMEOUT        16
 
-// Increase TCP connections for MQTT
 #define MEMP_NUM_TCP_PCB            10
 
-// Optional: Enable MQTT debug output
 #define MQTT_DEBUG                  LWIP_DBG_OFF
 
-// Disable TLS (not needed for basic MQTT)
 #define LWIP_ALTCP                  0
 #define LWIP_ALTCP_TLS              0
 #define LWIP_ALTCP_TLS_MBEDTLS      0

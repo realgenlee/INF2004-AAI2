@@ -5,9 +5,9 @@
 
 // ==== Line follower IR ====
 #define IR_LINE_WHITE_HIGH        0   // 0: white low, black high
-#define IR_LINE_EDGE_LOW_LIMIT  200
+#define IR_LINE_EDGE_LOW_LIMIT  1400
 #define IR_LINE_EDGE_HIGH_LIMIT 2100
-#define IR_LINE_THRESHOLD 1000
+#define IR_LINE_THRESHOLD ((IR_LINE_EDGE_LOW_LIMIT + IR_LINE_EDGE_HIGH_LIMIT) / 2.0f)
 #define IR_LINE_PRINT_INTERVAL_MS  500
 
 // ==== Barcode IR ====

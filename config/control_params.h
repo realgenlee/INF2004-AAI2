@@ -44,5 +44,5 @@
 #define MAX_TURN_SPEED            25.0f
 #define APPROACH_THRESHOLD        20.0f
 #define HOLD_TIME_MS             300
-#define TURN_TIMEOUT_MS         4000
+#define TURN_TIMEOUT_MS         5000
 #define PRINT_INTERVAL_MS        100

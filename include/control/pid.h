@@ -4,17 +4,12 @@
 #include <stdint.h>
 
 typedef struct {
-    // gains
     float kp, ki, kd;
-    // state
     float integ;
     float prev_err;
-    // limits
     float out_min, out_max;
     float integ_min, integ_max;
-    // timing
     float dt_s;
-    // misc
     uint8_t first;
 } pid_t;
 
