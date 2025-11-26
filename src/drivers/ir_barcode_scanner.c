@@ -1,272 +1,434 @@
+#include "drivers/ir_barcode_scanner.h"
+
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
-#include "hardware/gpio.h"
 #include "config.h"
-#include "drivers/ir_barcode_scanner.h"
 
-// Code 39 character lookup table
-static const char code_39_characters[] = "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ-. *";
+// ============================================================================
+// INTERNAL CONFIGURATION
+// ============================================================================
 
-static barcode_data_t barcode_data;
-static barcode_flags_t barcode_flags;
-static bool scanning_active = false;
-static uint64_t last_transition_us = 0;
-static bool last_state = false;
+#define BARCODE_ADC_GPIO              IR_BARCODE_ADC_GPIO
+#define BARCODE_ADC_CHANNEL           IR_BARCODE_ADC_CHANNEL
 
-// For Code 39 decoding
-static int black_bar_times[5] = {0};
-static int white_bar_times[5] = {0};
-static char decoded_char = '\0';
-static bool char_ready = false;
+// Minimum duration for a valid bar or space (ms)
+#define BARCODE_MIN_SEGMENT_MS        3
 
-void ir_barcode_scanner_init(void) {
-    // Initialize ADC if not already done
-    static bool adc_initialized = false;
-    if (!adc_initialized) {
-        adc_init();
-        adc_initialized = true;
-    }
-    
-    adc_gpio_init(IR_BARCODE_ADC_GPIO);
-    
-    gpio_init(IR_BARCODE_DIGITAL_GPIO);
-    gpio_set_dir(IR_BARCODE_DIGITAL_GPIO, GPIO_IN);
-    gpio_disable_pulls(IR_BARCODE_DIGITAL_GPIO);
+// Segments shorter than this are merged into neighbours (ms)
+#define BARCODE_MERGE_THRESHOLD_MS    15
 
-    memset(&barcode_data, 0, sizeof(barcode_data_t));
-    memset(&barcode_flags, 0, sizeof(barcode_flags_t));
-    
-    printf("Barcode Scanner IR initialized: ADC on GP%d (ch%d), Digital on GP%d\n",
-           IR_BARCODE_ADC_GPIO, IR_BARCODE_ADC_CHANNEL, IR_BARCODE_DIGITAL_GPIO);
+// Cooldown time after a decode (ms)
+#define BARCODE_COOLDOWN_MS           2000
+
+// Max segments in a single Code 39 character
+#define BARCODE_MAX_SEGMENTS          9
+
+// Timeout while recording one block (ms)
+#define BARCODE_BLOCK_TIMEOUT_MS      2000
+
+// ============================================================================
+// INTERNAL TYPES
+// ============================================================================
+
+typedef enum {
+    BARCODE_WAIT_WHITE = 0,
+    BARCODE_RECORD_SEGMENTS,
+    BARCODE_COOLDOWN
+} barcode_state_t;
+
+typedef struct {
+    bool     is_black;
+    uint32_t duration_ms;
+} barcode_segment_t;
+
+typedef struct {
+    barcode_state_t   state;
+    barcode_segment_t segments[BARCODE_MAX_SEGMENTS];
+    int               segment_count;
+    uint32_t          segment_start_ms;
+    bool              last_color;
+    uint32_t          cooldown_start_ms;
+    char              final_char;
+    bool              has_valid_char;
+} barcode_scanner_t;
+
+// ============================================================================
+// INTERNAL STATE
+// ============================================================================
+
+static barcode_scanner_t g_scanner = {0};
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+// Get current time in milliseconds
+static inline uint32_t barcode_now_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
 }
 
-void ir_barcode_start_scan(void) {
-    memset(&barcode_data, 0, sizeof(barcode_data_t));
-    memset(&barcode_flags, 0, sizeof(barcode_flags_t));
-    memset(black_bar_times, 0, sizeof(black_bar_times));
-    memset(white_bar_times, 0, sizeof(white_bar_times));
-    
-    barcode_flags.is_scanning = true;
-    scanning_active = true;
-    barcode_flags.last_transition_time = time_us_64();
-    last_state = gpio_get(IR_BARCODE_DIGITAL_GPIO);
-    decoded_char = '\0';
-    char_ready = false;
-    
-    printf("[BARCODE] Scan started\n");
-}
-
-void ir_barcode_stop_scan(void) {
-    scanning_active = false;
-    barcode_flags.is_scanning = false;
-    printf("[BARCODE] Scan stopped, detected %d bars\n", barcode_data.bar_count);
-}
-
-void ir_barcode_reset(void) {
-    memset(&barcode_data, 0, sizeof(barcode_data_t));
-    memset(&barcode_flags, 0, sizeof(barcode_flags_t));
-    memset(black_bar_times, 0, sizeof(black_bar_times));
-    memset(white_bar_times, 0, sizeof(white_bar_times));
-    decoded_char = '\0';
-    char_ready = false;
-    scanning_active = false;
-}
-
-bool ir_barcode_is_scanning(void) {
-    return scanning_active;
-}
-
-// Decode single Code 39 character from bar timings (based on Ryan's implementation)
-char ir_barcode_decode_code39(int black_bar_times[5], int white_bar_times[5]) {
-    // Calculate relative timings
-    int dec_black_bar_times[5];
-    int dec_white_bar_times[4];
-    
-    dec_black_bar_times[0] = (white_bar_times[0] - black_bar_times[0]);
-    dec_black_bar_times[1] = (white_bar_times[1] - black_bar_times[1]);
-    dec_black_bar_times[2] = (white_bar_times[2] - black_bar_times[2]);
-    dec_black_bar_times[3] = (white_bar_times[3] - black_bar_times[3]);
-    dec_black_bar_times[4] = (white_bar_times[4] - black_bar_times[4]);
-
-    dec_white_bar_times[0] = (black_bar_times[1] - white_bar_times[0]);
-    dec_white_bar_times[1] = (black_bar_times[2] - white_bar_times[1]);
-    dec_white_bar_times[2] = (black_bar_times[3] - white_bar_times[2]);
-    dec_white_bar_times[3] = (black_bar_times[4] - white_bar_times[3]);
-
-    // Find two highest black bars
-    int max1 = 0, max2 = 0;
-    for (int i = 0; i < 5; i++) {
-        if (dec_black_bar_times[i] > max1) {
-            max2 = max1;
-            max1 = dec_black_bar_times[i];
-        } else if (dec_black_bar_times[i] > max2) {
-            max2 = dec_black_bar_times[i];
-        }
-    }
-
-    // Set the two highest to 1, rest to 0 for black bars
-    for (int i = 0; i < 5; i++) {
-        if (dec_black_bar_times[i] == max1 || dec_black_bar_times[i] == max2) {
-            dec_black_bar_times[i] = 1;
-        } else {
-            dec_black_bar_times[i] = 0;
-        }
-    }
-
-    // Find highest white bar
-    int max_white = dec_white_bar_times[0];
-    for (int i = 1; i < 4; i++) {
-        if (dec_white_bar_times[i] > max_white) {
-            max_white = dec_white_bar_times[i];
-        }
-    }
-
-    // Set highest to 1, rest to 0 for white bars
-    for (int i = 0; i < 4; i++) {
-        if (dec_white_bar_times[i] == max_white) {
-            dec_white_bar_times[i] = 1;
-        } else {
-            dec_white_bar_times[i] = 0;
-        }
-    }
-
-    // Calculate result index based on Code 39 encoding
-    int result = 0;
-
-    // Black bar encoding
-    if (dec_black_bar_times[0] && dec_black_bar_times[4])
-        result += 1;
-    else if (dec_black_bar_times[1] && dec_black_bar_times[4])
-        result += 2;
-    else if (dec_black_bar_times[0] && dec_black_bar_times[1])
-        result += 3;
-    else if (dec_black_bar_times[2] && dec_black_bar_times[4])
-        result += 4;
-    else if (dec_black_bar_times[0] && dec_black_bar_times[2])
-        result += 5;
-    else if (dec_black_bar_times[1] && dec_black_bar_times[2])
-        result += 6;
-    else if (dec_black_bar_times[3] && dec_black_bar_times[4])
-        result += 7;
-    else if (dec_black_bar_times[0] && dec_black_bar_times[3])
-        result += 8;
-    else if (dec_black_bar_times[1] && dec_black_bar_times[3])
-        result += 9;
-    else if (dec_black_bar_times[2] && dec_black_bar_times[3])
-        result += 10;
-
-    // White bar encoding
-    if (dec_white_bar_times[1])
-        result += 0;
-    else if (dec_white_bar_times[2])
-        result += 9;
-    else if (dec_white_bar_times[3])
-        result += 19;
-    else if (dec_white_bar_times[0])
-        result += 29;
-    
-    if (result >= 0 && result < 40) {
-        return code_39_characters[result];
-    }
-    
-    return '\0';
-}
-
-void ir_barcode_update(void) {
-    if (!scanning_active) return;
-    
-    // Read ADC value
-    uint16_t reading = ir_barcode_read_adc_raw();
-    uint64_t now_us = time_us_64();
-    
-    // Detect black bar (above threshold)
-    if (reading > IR_BARCODE_THRESHOLD && !barcode_flags.is_prev_black_bar) {
-        // Transition to black bar
-        barcode_flags.is_prev_black_bar = true;
-        int timing = (int)(now_us - barcode_flags.last_transition_time);
-        black_bar_times[barcode_flags.bar_index] = timing;
-        barcode_flags.last_transition_time = now_us;
-    }
-    // Detect white space (below threshold)
-    else if (reading < IR_BARCODE_THRESHOLD && barcode_flags.is_prev_black_bar) {
-        // Transition to white space
-        barcode_flags.is_prev_black_bar = false;
-        int timing = (int)(now_us - barcode_flags.last_transition_time);
-        white_bar_times[barcode_flags.bar_index] = timing;
-        barcode_flags.last_transition_time = now_us;
-        barcode_flags.bar_index++;
-    }
-    
-    // Check if we've collected all 5 bars (one complete character)
-    if (white_bar_times[4] != 0) {
-        // Decode the character
-        char ch = ir_barcode_decode_code39(black_bar_times, white_bar_times);
-        
-        if (ch == '*') {
-            // Delimiter detected
-            barcode_flags.delimiter_count++;
-            printf("[BARCODE] Delimiter '*' detected (count: %d)\n", barcode_flags.delimiter_count);
-            
-            // If we've seen 2 delimiters, scanning complete
-            if (barcode_flags.delimiter_count >= 2) {
-                printf("[BARCODE] Scan complete!\n");
-                barcode_data.scan_complete = true;
-                scanning_active = false;
-                barcode_flags.is_scanning = false;
-            }
-        } else if (ch != '\0') {
-            // Valid character decoded
-            decoded_char = ch;
-            char_ready = true;
-            printf("[BARCODE] ✓ Character decoded: '%c'\n", decoded_char);
-            
-            // Store in decoded string
-            int len = strlen(barcode_data.decoded_value);
-            if (len < sizeof(barcode_data.decoded_value) - 1) {
-                barcode_data.decoded_value[len] = ch;
-                barcode_data.decoded_value[len + 1] = '\0';
-            }
-        }
-        
-        // Reset for next character
-        memset(black_bar_times, 0, sizeof(black_bar_times));
-        memset(white_bar_times, 0, sizeof(white_bar_times));
-        barcode_flags.bar_index = 0;
-        barcode_flags.is_prev_black_bar = false;
-    }
-}
-
-barcode_data_t* ir_barcode_get_data(void) {
-    return &barcode_data;
-}
-
-bool ir_barcode_decode(barcode_data_t* data) {
-    // Already decoded in update loop
-    return (strlen(data->decoded_value) > 0);
-}
-
-void ir_barcode_print_data(void) {
-    printf("[BARCODE] Decoded string: \"%s\"\n", barcode_data.decoded_value);
-    printf("[BARCODE] Last character: '%c'\n", decoded_char);
-    printf("[BARCODE] Scan complete: %s\n", barcode_data.scan_complete ? "YES" : "NO");
-}
-
-uint16_t ir_barcode_read_adc_raw(void) {
-    adc_select_input(IR_BARCODE_ADC_CHANNEL);
+// Read raw ADC value from barcode channel
+static uint16_t barcode_read_adc_raw_internal(void) {
+    adc_select_input(BARCODE_ADC_CHANNEL);
+    sleep_us(5);
     return adc_read();
 }
 
-char ir_barcode_get_char(void) {
-    return decoded_char;
+// Convert ADC value to logical black / white
+static bool barcode_read_ir(void) {
+    uint16_t adc_value = barcode_read_adc_raw_internal();
+
+    bool is_black;
+
+#if IR_BARCODE_WHITE_HIGH
+    // White is HIGH, black is LOW
+    is_black = (adc_value < IR_BARCODE_THRESHOLD);
+#else
+    // White is LOW, black is HIGH
+    is_black = (adc_value > IR_BARCODE_THRESHOLD);
+#endif
+
+    return is_black;
 }
 
+// Reset scanner to idle state
+static void barcode_reset_internal(void) {
+    g_scanner.state           = BARCODE_WAIT_WHITE;
+    g_scanner.segment_count   = 0;
+    g_scanner.segment_start_ms = barcode_now_ms();
+    g_scanner.last_color      = false;
+}
+
+// Merge very small segments into their neighbours
+static void merge_small_segments(barcode_scanner_t *scanner) {
+    int i = 0;
+
+    while (i < scanner->segment_count - 1) {
+        if (scanner->segments[i].duration_ms < BARCODE_MERGE_THRESHOLD_MS) {
+            scanner->segments[i + 1].duration_ms += scanner->segments[i].duration_ms;
+
+            for (int j = i; j < scanner->segment_count - 1; j++) {
+                scanner->segments[j] = scanner->segments[j + 1];
+            }
+
+            scanner->segment_count--;
+        } else {
+            i++;
+        }
+    }
+}
+
+// Validate colour pattern for Code 39
+static bool validate_color_pattern(barcode_segment_t *segments, int count) {
+    if (count != BARCODE_MAX_SEGMENTS) {
+        return false;
+    }
+
+    if (!segments[0].is_black) {
+        return false;
+    }
+
+    for (int i = 0; i < count; i++) {
+        bool expected_black = (i % 2 == 0);
+        if (segments[i].is_black != expected_black) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Code 39 pattern lookup table
+static const struct {
+    const char *pattern;
+    char        character;
+} CODE39_TABLE[] = {
+    {"NWNNWNWNN", '*'},
+    {"WNNNNWNNW", 'A'},
+    {"NNWNNWNNW", 'B'},
+    {"WNWNNWNNN", 'C'},
+    {"NNNNWWNNW", 'D'},
+    {"WNNNWWNNN", 'E'},
+    {"NNWNWWNNN", 'F'},
+    {"NNNNNWWNW", 'G'},
+    {"WNNNNWWNN", 'H'},
+    {"NNWNNWWNN", 'I'},
+    {"NNNNWWWNN", 'J'},
+    {"WNNNNNNWW", 'K'},
+    {"NNWNNNNWW", 'L'},
+    {"WNWNNNNWN", 'M'},
+    {"NNNNWNNWW", 'N'},
+    {"WNNNWNNWN", 'O'},
+    {"NNWNWNNWN", 'P'},
+    {"NNNNNNWWW", 'Q'},
+    {"WNNNNNWWN", 'R'},
+    {"NNWNNNWWN", 'S'},
+    {"NNNNWNWWN", 'T'},
+    {"WWNNNNNNW", 'U'},
+    {"NWWNNNNNW", 'V'},
+    {"WWWNNNNNN", 'W'},
+    {"NWNWNNNNW", 'X'},
+    {"WWNWNNNNN", 'Y'},
+    {"NWWNNNNNN", 'Z'},
+    {"NNNWWNWNN", '0'},
+    {"WNNWNNNNW", '1'},
+    {"NNWWNNNNW", '2'},
+    {"WNWWNNNNN", '3'},
+    {"NNNWWNNNW", '4'},
+    {"WNNWWNNNN", '5'},
+    {"NNWWWNNNN", '6'},
+    {"NNNWWNNNW", '7'},
+    {"WNNNWNNNW", '8'},
+    {"NNWWWNNNW", '9'},
+};
+
+// Classify segments as narrow / wide by picking 3 longest
+static bool classify_segments(barcode_segment_t *segments, int count, char *pattern_out) {
+    if (count != BARCODE_MAX_SEGMENTS) {
+        return false;
+    }
+
+    typedef struct {
+        uint32_t duration;
+        int      index;
+    } segment_duration_t;
+
+    segment_duration_t tmp[BARCODE_MAX_SEGMENTS];
+
+    for (int i = 0; i < count; i++) {
+        tmp[i].duration = segments[i].duration_ms;
+        tmp[i].index    = i;
+    }
+
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (tmp[j].duration > tmp[i].duration) {
+                segment_duration_t t = tmp[i];
+                tmp[i] = tmp[j];
+                tmp[j] = t;
+            }
+        }
+    }
+
+    bool is_wide[BARCODE_MAX_SEGMENTS] = {0};
+
+    for (int k = 0; k < 3; k++) {
+        is_wide[tmp[k].index] = true;
+    }
+
+    int narrow_count = 0;
+    int wide_count   = 0;
+
+    for (int i = 0; i < count; i++) {
+        if (is_wide[i]) {
+            pattern_out[i] = 'W';
+            wide_count++;
+        } else {
+            pattern_out[i] = 'N';
+            narrow_count++;
+        }
+    }
+
+    pattern_out[count] = '\0';
+
+    if (narrow_count != 6 || wide_count != 3) {
+        return false;
+    }
+
+    return true;
+}
+
+// Lookup Code39 character for a forward pattern
+static char lookup_code39_character(const char *pattern) {
+    int table_size = (int)(sizeof(CODE39_TABLE) / sizeof(CODE39_TABLE[0]));
+
+    for (int i = 0; i < table_size; i++) {
+        if (strcmp(pattern, CODE39_TABLE[i].pattern) == 0) {
+            return CODE39_TABLE[i].character;
+        }
+    }
+
+    return '\0';
+}
+
+// Lookup Code39 character, trying both forward and reversed pattern
+static char lookup_code39_character_bidirectional(const char *pattern) {
+    char ch = lookup_code39_character(pattern);
+    if (ch != '\0') {
+        return ch;
+    }
+
+    char reversed[BARCODE_MAX_SEGMENTS + 1];
+    int  length = (int)strlen(pattern);
+
+    for (int i = 0; i < length; i++) {
+        reversed[i] = pattern[length - 1 - i];
+    }
+    reversed[length] = '\0';
+
+    return lookup_code39_character(reversed);
+}
+
+// Decode 9 segments into a Code39 character
+static bool decode_block(barcode_scanner_t *scanner, char *result) {
+    if (!validate_color_pattern(scanner->segments, scanner->segment_count)) {
+        return false;
+    }
+
+    char pattern[BARCODE_MAX_SEGMENTS + 1];
+
+    if (!classify_segments(scanner->segments, scanner->segment_count, pattern)) {
+        return false;
+    }
+
+    char ch = lookup_code39_character_bidirectional(pattern);
+    if (ch == '\0') {
+        return false;
+    }
+
+    *result = ch;
+    return true;
+}
+
+// ============================================================================
+// PUBLIC IMPLEMENTATION
+// ============================================================================
+
+// Initialise barcode scanner
+void ir_barcode_scanner_init(void) {
+    adc_gpio_init(BARCODE_ADC_GPIO);
+    memset(&g_scanner, 0, sizeof(g_scanner));
+    g_scanner.state = BARCODE_WAIT_WHITE;
+    g_scanner.segment_start_ms = barcode_now_ms();
+}
+
+// Update barcode scanner state machine
+void ir_barcode_update(void) {
+    uint32_t now          = barcode_now_ms();
+    bool     current_black = barcode_read_ir();
+
+    switch (g_scanner.state) {
+        case BARCODE_WAIT_WHITE: {
+            static bool init_done = false;
+
+            if (!init_done) {
+                g_scanner.last_color       = current_black;
+                g_scanner.segment_start_ms = now;
+                init_done                  = true;
+                break;
+            }
+
+            if (current_black == g_scanner.last_color) {
+                break;
+            }
+
+            g_scanner.segment_start_ms = now;
+            g_scanner.last_color       = current_black;
+
+            if (current_black) {
+                g_scanner.segment_count            = 1;
+                g_scanner.segments[0].is_black     = true;
+                g_scanner.segments[0].duration_ms  = 0;
+                g_scanner.state                    = BARCODE_RECORD_SEGMENTS;
+            }
+            break;
+        }
+
+        case BARCODE_RECORD_SEGMENTS: {
+            if (current_black != g_scanner.last_color) {
+                uint32_t duration = now - g_scanner.segment_start_ms;
+
+                if (duration < BARCODE_MIN_SEGMENT_MS) {
+                    g_scanner.segment_start_ms = now;
+                    break;
+                }
+
+                if (g_scanner.segment_count > 0) {
+                    g_scanner.segments[g_scanner.segment_count - 1].duration_ms = duration;
+                }
+
+                if (g_scanner.segment_count == BARCODE_MAX_SEGMENTS) {
+                    merge_small_segments(&g_scanner);
+
+                    char decoded;
+                    if (decode_block(&g_scanner, &decoded)) {
+                        g_scanner.final_char     = decoded;
+                        g_scanner.has_valid_char = true;
+                    }
+
+                    barcode_reset_internal();
+                    break;
+                }
+
+                if (g_scanner.segment_count < BARCODE_MAX_SEGMENTS) {
+                    g_scanner.segments[g_scanner.segment_count].is_black    = current_black;
+                    g_scanner.segments[g_scanner.segment_count].duration_ms = 0;
+                    g_scanner.segment_count++;
+                    g_scanner.segment_start_ms = now;
+                    g_scanner.last_color       = current_black;
+                } else {
+                    barcode_reset_internal();
+                }
+            } else {
+                uint32_t duration = now - g_scanner.segment_start_ms;
+                if (duration > BARCODE_BLOCK_TIMEOUT_MS) {
+                    barcode_reset_internal();
+                }
+            }
+            break;
+        }
+
+        case BARCODE_COOLDOWN: {
+            if ((now - g_scanner.cooldown_start_ms) > BARCODE_COOLDOWN_MS) {
+                g_scanner.state           = BARCODE_WAIT_WHITE;
+                g_scanner.segment_count   = 0;
+                g_scanner.segment_start_ms = now;
+                g_scanner.last_color      = current_black;
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+// Print last scan data
+void ir_barcode_print_data(void) {
+    if (!g_scanner.has_valid_char) {
+        printf("[BARCODE] No decoded character\n");
+        return;
+    }
+
+    printf("[BARCODE] Decoded char: '%c'\n", g_scanner.final_char);
+}
+
+// Return raw ADC value
+uint16_t ir_barcode_read_adc_raw(void) {
+    return barcode_read_adc_raw_internal();
+}
+
+// Reset scanner and clear state
+void ir_barcode_reset(void) {
+    barcode_reset_internal();
+    g_scanner.final_char     = '\0';
+    g_scanner.has_valid_char = false;
+}
+
+// Check if a new character is available
 bool ir_barcode_has_char(void) {
-    return char_ready;
+    return g_scanner.has_valid_char;
 }
 
+// Get last decoded character
+char ir_barcode_get_char(void) {
+    return g_scanner.final_char;
+}
+
+// Clear decoded character flag
 void ir_barcode_clear_char(void) {
-    char_ready = false;
-    decoded_char = '\0';
+    g_scanner.has_valid_char = false;
+    g_scanner.final_char     = '\0';
 }

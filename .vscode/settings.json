@@ -38,8 +38,7 @@
     "raspberry-pi-pico.cmakePath": "${HOME}/.pico-sdk/cmake/v3.31.5/bin/cmake",
     "raspberry-pi-pico.ninjaPath": "${HOME}/.pico-sdk/ninja/v1.12.1/ninja",
     "files.associations": {
-        "compare": "cpp",
-        "cstdint": "cpp"
-    },
-    "liveServer.settings.port": 5501
+        "math.h": "c",
+        "ir_line_follower.h": "c"
+    }
 }

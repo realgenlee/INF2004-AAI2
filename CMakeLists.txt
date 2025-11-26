@@ -50,7 +50,6 @@ pico_sdk_init()
 
 add_executable(INF2004-AAI2
     src/main.c
-    src/fsm.c
     src/drivers/motor.c
     src/drivers/encoder.c
     src/control/pid.c
